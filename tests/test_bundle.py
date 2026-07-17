@@ -62,7 +62,7 @@ class TestBundleIsSelfContained(unittest.TestCase):
             # this fixture set, not a failure of the bundle itself
             self.assertIn(bundle_run.returncode, (0, 1), msg=bundle_run.stderr)
             self.assertNotIn("Traceback", bundle_run.stderr)
-            self.assertIn("HITs: 39", bundle_run.stdout)
+            self.assertIn("Findings: 39", bundle_run.stdout)
 
             package_out = tmp / "package_out"
             package_out.mkdir()

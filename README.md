@@ -1,10 +1,21 @@
 # metchurial
 
-A static scanner that detects hardcoded sensitive values — customer IDs,
-policy numbers, Korean person names — in DB2 SQL files. Rule 1 (hardcoded
-literals compared against sensitive columns) runs on a real parse tree,
-built with ANTLR4 using [`antlr/grammars-v4`](https://github.com/antlr/grammars-v4)'s
-`sql/db2` grammar, a purpose-built IBM Db2 LUW SQL grammar.
+A static-analysis toolkit for DB2 SQL files, built on a real parse tree —
+not regex — using [`antlr/grammars-v4`](https://github.com/antlr/grammars-v4)'s
+`sql/db2` grammar, a purpose-built IBM Db2 LUW SQL grammar, via ANTLR4. It
+detects hardcoded sensitive values (customer IDs, policy numbers, Korean
+person names), extracts schema/table/column/relation/function metadata,
+splits multi-statement files into one file per SELECT block, and masks
+flagged literals in place.
+
+## Capabilities
+
+| Capability | Flag | Details |
+|---|---|---|
+| **Detection** — sensitive-column comparisons and known-name literals | *(default, always on)* | [What it detects](#what-it-detects) |
+| **Metadata extraction** — table/column/function/predicate refs, JOIN relations | `--extract-metadata` | [Output artifacts](#output-artifacts) |
+| **File splitting** — one file per standalone SELECT block | `--split-selects` | [Output artifacts](#output-artifacts) |
+| **Literal masking** — rewrite flagged literals to fixed placeholders in place | `--mask-literals` | [Output artifacts](#output-artifacts) |
 
 ## Quick start
 
@@ -26,7 +37,7 @@ python metchurial.py C:\sql\root --workers 8 --verbose
 Every run writes its artifacts (`summary.md`, `findings.tsv`, ...) into the
 **current working directory**, not the scan root — see
 [Output artifacts](#output-artifacts) below. Exit code is `1` if anything
-was found (HIT), `0` if clean — convenient for wiring into a CI
+was found (FINDING), `0` if clean — convenient for wiring into a CI
 step or a pre-commit check.
 
 **Before carrying `dist/metchurial.py` into a restricted
@@ -58,7 +69,7 @@ tooling required for that (those are dev-only, for regenerating
 | Flag | Default | Description |
 |---|---|---|
 | `root` (positional) | — | Directory to scan recursively |
-| `--sensitive-columns` | `ACCT_ID CTRT_NO ACCT_NM ACCT_NAME` | Column names Rule 1 treats as sensitive; fully replaces the default list, doesn't add to it |
+| `--sensitive-columns` | `ACCT_ID CTRT_NO ACCT_NM ACCT_NAME` | Column names sensitive-column comparison detection treats as sensitive; fully replaces the default list, doesn't add to it |
 | `--extensions` | `sql txt` | File extensions to scan, without the dot |
 | `--extract-metadata` | off | Also emit `refs_tables.tsv`/`refs_columns.tsv`/`refs_functions.tsv`/`refs_relations.tsv` (schema/table/column refs, JOIN relationships, function/predicate usage) and matching summary.md sections — see [Output artifacts](#output-artifacts) |
 | `--split-selects` | off | For a file with 2+ standalone SELECT blocks, write one `<stem>-NN<ext>` file per block alongside the original (files with a single block are left as-is) |
@@ -78,18 +89,21 @@ to your full core count.
 
 ## What it detects
 
-- **Rule 1 — HIT**: a sensitive column (see `--sensitive-columns`)
-  compared to a hardcoded literal — `=`, `<>`, `!=`, `<=`, `>=`, `<`, `>`,
-  `(NOT) IN (...)`, `(NOT) LIKE`, `BETWEEN ... AND ...`, or a bare `(`
-  before a literal (a DB2 quirk) — in either direction and regardless of
-  spacing or line breaks.
-- **Rule 2 — HIT**: any quoted, name-shaped literal (2-4 Hangul syllables)
-  whose text is listed in `known_names.txt`, regardless of which column
-  it's compared to. There's no surname heuristic — a literal only becomes
-  a HIT once a human has confirmed it's a real name. Every other
-  name-shaped literal is a triage *candidate*: it shows up in
-  `strings.txt` each run until it's copied into either `known_names.txt`
-  (flags it HIT from then on) or `stopwords.txt` (excludes it from
+Detection is two independent mechanisms, both always on, each producing its
+own finding:
+
+- **Sensitive-Column Comparison Detection — FINDING**: a sensitive column
+  (see `--sensitive-columns`) compared to a hardcoded literal — `=`, `<>`,
+  `!=`, `<=`, `>=`, `<`, `>`, `(NOT) IN (...)`, `(NOT) LIKE`,
+  `BETWEEN ... AND ...`, or a bare `(` before a literal (a DB2 quirk) — in
+  either direction and regardless of spacing or line breaks.
+- **Known-Name Matching — FINDING**: any quoted, name-shaped literal (2-4
+  Hangul syllables) whose text is listed in `known_names.txt`, regardless
+  of which column it's compared to. There's no surname heuristic — a
+  literal only becomes a finding once a human has confirmed it's a real
+  name. Every other name-shaped literal is a triage *candidate*: it shows up
+  in `strings.txt` each run until it's copied into either `known_names.txt`
+  (flags it as a finding from then on) or `stopwords.txt` (excludes it from
   `strings.txt` from then on). Both files are one word per line, `#`
   comments allowed, auto-created empty on first run — see
   [Output artifacts](#output-artifacts).
@@ -122,11 +136,11 @@ not a duplicate of it.
 
 | File | Written when | Contents |
 |---|---|---|
-| `summary.md` | always | Run info, Sensitive Hits (with per-file detail), String Occurrences, Bad Files, Stopwords, Known Names, and — if enabled — Table & Column References, Functions, Relations, Select Blocks |
-| `findings.tsv` | always | Every HIT, one row per literal, for filtering/sorting in Excel |
+| `summary.md` | always | Run info, Sensitive Findings (with per-file detail), String Occurrences, Bad Files, Stopwords, Known Names, and — if enabled — Table & Column References, Functions, Relations, Select Blocks |
+| `findings.tsv` | always | Every finding, one row per literal, for filtering/sorting in Excel |
 | `strings.txt` | always | Unique name-shaped literals not yet classified into `known_names.txt`/`stopwords.txt`, with occurrence counts, in a format directly copy-pasteable into either |
 | `stopwords.txt` | always (auto-created empty with a format header if missing) | Name-shaped literals reviewed and confirmed *not* sensitive — excluded from `strings.txt` from then on; edit in place |
-| `known_names.txt` | always (auto-created empty with a format header if missing) | Name-shaped literals reviewed and confirmed sensitive — every matching literal becomes a Rule 2 HIT from then on; edit in place |
+| `known_names.txt` | always (auto-created empty with a format header if missing) | Name-shaped literals reviewed and confirmed sensitive — every matching literal becomes a known-name finding from then on; edit in place |
 | `bad_files.txt` | always | Persistent skip-list of files too malformed to parse — see [Bad files](#bad-files) |
 | `refs_tables.tsv` | `--extract-metadata` | Every `schema.table` reference found, with file/line |
 | `refs_columns.tsv` | `--extract-metadata` | Every `schema.table.column` reference found, with file/line |

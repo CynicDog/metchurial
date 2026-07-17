@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """Re-scans each hidden comment token's own isolated text for the same
-Rule-1 (HIT) constructs the live-code driver looks for, tagging them
-in_comment=Y -- commented-out or example code can still leak real data.
+sensitive-column comparison detection constructs the live-code driver looks
+for, tagging them in_comment=Y -- commented-out or example code can still
+leak real data.
 
 Hidden comment tokens are already cleanly delimited by the lexer (a
 comment token's text can never span into or absorb subsequent live code --
@@ -10,10 +11,10 @@ own small, fully isolated re-parse -- no discard-and-resume search needed.
 This grammar's block comments, `SQL_COMMENT`, support nesting -- a nested
 `/* */` inside the outer one becomes its own hidden token when the
 stripped inner text is re-lexed, so `rescan_comments` recurses into each
-comment's own inner tokens to catch a HIT sitting inside a
+comment's own inner tokens to catch a finding sitting inside a
 comment-within-a-comment too, not just the outermost layer.
 
-Rule 2 (known-name HIT) is *not* handled here -- it isn't a parsing
+Known-name matching is *not* handled here -- it isn't a parsing
 concern (see scan.py), so it runs as a single whole-file regex pass over
 raw text there, with in_comment derived from the same comment-token spans
 this module also uses.

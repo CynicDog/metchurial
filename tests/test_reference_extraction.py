@@ -67,8 +67,8 @@ class TestColumnRefs(unittest.TestCase):
         self.assertEqual(col_refs[0]["table"], "(no-table)")
 
     def test_existing_hit_detection_still_fires_alongside_ref_extraction(self):
-        # Feature 1 shouldn't change Rule 1's own behavior when both are
-        # requested in the same scan_file call.
+        # Feature 1 shouldn't change sensitive-column comparison detection's
+        # own behavior when both are requested in the same scan_file call.
         fd, path = tempfile.mkstemp(suffix=".sql")
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:

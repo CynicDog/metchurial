@@ -92,7 +92,7 @@ def main(argv=None):
                         "nothing to split apart). CTE bodies are never miscounted as "
                         "their own block (default: off)")
     ap.add_argument("--mask-literals", action="store_true",
-                    help="Rewrite in place each file with a HIT finding: "
+                    help="Rewrite in place each file with a finding: "
                         "every flagged literal's content is replaced with a fixed "
                         "placeholder ('****' for a quoted literal, preserving its "
                         "own quote character; '0000' for an unquoted numeric "
@@ -196,14 +196,14 @@ def main(argv=None):
 
         relations_module.write_relations_tsv(RELATIONS_PATH, relations_summary)
 
-    print("Scanned {} file(s) (.{}). HITs: {}".format(
+    print("Scanned {} file(s) (.{}). Findings: {}".format(
         file_count, ", .".join(args.extensions), len(hits)))
     print("Summary        : {}".format(os.path.abspath(SUMMARY_PATH)))
     print("Findings       : {}".format(os.path.abspath(FINDINGS_PATH)))
     print("Strings        : {}".format(os.path.abspath(STRINGS_PATH)))
     if name_candidates:
         print("Names to review: {} unique unclassified name-like literal(s) in {} -- "
-             "copy a real name into known_names.txt (flagged HIT next run), or a "
+             "copy a real name into known_names.txt (flagged as a finding next run), or a "
              "non-name into stopwords.txt (won't show up again).".format(
                  len(set(name_candidates)), os.path.abspath(STRINGS_PATH)))
     if args.extract_metadata:

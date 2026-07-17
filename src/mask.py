@@ -1,13 +1,14 @@
 # -*- coding: utf-8 -*-
-"""--mask-literals: rewrites in place each file that has a HIT finding,
-with every flagged literal's content replaced by a fixed placeholder,
-everything else in the file byte-for-byte unchanged.
+"""--mask-literals: rewrites in place each file that has a finding, with
+every flagged literal's content replaced by a fixed placeholder, everything
+else in the file byte-for-byte unchanged.
 
 This module never re-derives "is this a sensitive literal" itself -- it
 strictly consumes the (start_offset, end_offset) span already captured on
 each finding dict by extractor_visitor.py/supplementary_checks.py/
-comment_rescan.py (Rule 1 HIT, via three independent detection paths) and
-scan.py's known_names.txt-matching regex pass (Rule 2 HIT). That division
+comment_rescan.py (sensitive-column comparison detection's finding, via
+three independent detection paths) and scan.py's known_names.txt-matching
+regex pass (known-name matching's finding). That division
 of labor is what makes masking automatically safe against the large set of
 edge cases those detectors already handle (bare-paren-before-literal,
 double-quoted literals, IN-lists, BETWEEN bounds, reversed comparisons,
@@ -44,10 +45,11 @@ _NUMERIC_RE = re.compile(r"^(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?
 def _literal_replacement(span_text):
     """span_text = original_text[start:end + 1] for one finding's span.
     Returns the masked replacement, or None if this span's shape isn't one
-    of the two literal shapes Rule 1/2 can actually produce. This is
+    of the two literal shapes sensitive-column comparison detection/
+    known-name matching can actually produce. This is
     defense in depth, not the primary safety mechanism: e.g. NULL is a
     legal `constant_` alternative in the vendored grammar that
-    as_literal() could in principle return as a HIT value (no upstream
+    as_literal() could in principle return as a finding value (no upstream
     code special-cases it today), so this guard guarantees masking still
     never touches a keyword like that even if it ever reached here,
     without adding any new literal-matching logic of its own -- it only

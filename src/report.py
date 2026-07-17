@@ -4,7 +4,7 @@ strings.txt, refs_*.tsv) from the finding dicts (severity/file/line/
 column_name/operator/value/snippet/encoding/in_comment) scan.py produces.
 
 summary.md is an index into the other artifacts, not a duplicate of them:
-every section beyond "Sensitive Hits" is a bounded count-plus-top-N view
+every section beyond "Sensitive Findings" is a bounded count-plus-top-N view
 with a pointer to the full artifact file (strings.txt, bad_files.txt,
 stopwords.txt, known_names.txt, refs_*.tsv), so its size stays
 fixed regardless of how large the scan is.
@@ -19,7 +19,7 @@ import os
 # which most Markdown viewers wrap so badly it looks like a broken table.
 MAX_GROUPED_VALUES = 10
 
-# Per-file cap on rows in the "## Sensitive Hits" detail subsections --
+# Per-file cap on rows in the "## Sensitive Findings" detail subsections --
 # full, uncapped detail is always in findings.tsv.
 DETAIL_CAP = 15
 
@@ -116,7 +116,7 @@ def _write_sensitive_hits(out, hits):
     for f in hits:
         by_file.setdefault(f["file"], []).append(f)
 
-    out.write("## Sensitive Hits\n\n")
+    out.write("## Sensitive Findings\n\n")
     if not by_file:
         out.write("No hardcoded sensitive values detected. ✅\n\n")
         return
@@ -158,7 +158,7 @@ def _write_string_occurrences(out, name_candidates):
     ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
     out.write("{} unique name-like literal(s) not yet classified, {} occurrence(s) total. "
               "Full list in strings.txt -- copy a real name into known_names.txt to flag "
-              "it as HIT on the next run, or a non-name into stopwords.txt to stop seeing "
+              "it as a finding on the next run, or a non-name into stopwords.txt to stop seeing "
               "it here.\n\n".format(len(counts), sum(counts.values())))
     out.write("| Literal | Occurrences |\n|---|---:|\n")
     for word, count in ranked[:MAX_GROUPED_VALUES]:
@@ -279,7 +279,7 @@ def write_markdown_report(path, run_info, hits, name_candidates, previously_bad,
                           relations_summary=None, select_block_counts=None):
     """Writes summary.md, a fixed-size index into every artifact a scan
     produces (not a duplicate of any of them). Sections are written in
-    order: run info, Sensitive Hits (with per-file detail subsections),
+    order: run info, Sensitive Findings (with per-file detail subsections),
     String Occurrences, Bad Files, Stopwords, Known Names, then the opt-in
     sections -- Table & Column References / Functions / Relations, gated
     by `refs`/`function_calls`/`relations_summary` being non-None (i.e.
@@ -287,7 +287,7 @@ def write_markdown_report(path, run_info, hits, name_candidates, previously_bad,
     being non-None (i.e. --split-selects). A gated section is omitted
     entirely rather than rendered empty when its flag is off; a clean scan
     can still have JOIN relationships or bad files worth reporting, so
-    those sections are independent of whether any HIT was found.
+    those sections are independent of whether any finding was found.
     `run_info`: {invocation, root, file_count, sensitive_columns,
     extensions, workers, max_chunk_iterations, extract_metadata,
     split_selects, mask_literals, verbose}."""
@@ -319,7 +319,7 @@ def write_strings_file(path, name_candidates):
     with open(path, "w", encoding="utf-8-sig") as out:
         out.write("# Unique unclassified name-like literal(s) found in this scan: {}\n".format(
             len(counts)))
-        out.write("# Copy a REAL name into known_names.txt to flag it as a HIT on the next run.\n")
+        out.write("# Copy a REAL name into known_names.txt to flag it as a finding on the next run.\n")
         out.write("# Copy a NON-name (false positive) into stopwords.txt to stop seeing it here.\n")
         out.write("# (format is compatible with both: word per line, '#' comment allowed)\n\n")
         # most frequent first: frequent words are most likely business terms

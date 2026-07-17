@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """--extract-metadata's column-level extraction visitor -- walks *every*
 column reference in a chunk (not just ones compared to a literal, unlike
-extractor_visitor.ExtractorVisitor's Rule-1 scope) and resolves each one
+extractor_visitor.ExtractorVisitor's sensitive-column comparison detection
+scope) and resolves each one
 to its owning schema.table via table_scan.py's per-chunk QueryBlock alias
 maps. A separate class from ExtractorVisitor because the traversal shape
 is genuinely different: unconditional on every column_name/field_reference

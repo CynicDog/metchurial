@@ -114,8 +114,8 @@ def ensure_known_names_template(path):
         f.write("# metchurial known-names list -- one word per line, '#' comment "
                "allowed (everything after '#' on a line is ignored).\n")
         f.write("# A word here has been reviewed and confirmed a real sensitive "
-               "name -- every matching literal is flagged HIT on every future "
-               "run, regardless of which column it's compared to. See "
+               "name -- every matching literal is flagged as a finding on every "
+               "future run, regardless of which column it's compared to. See "
                "strings.txt for candidates to triage.\n")
 
 

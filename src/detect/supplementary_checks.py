@@ -4,8 +4,9 @@
 Reached when neither sql_statement() nor a directly- or WHERE/ON-anchored
 search_condition() could make any progress at the current position. This
 is not a rare edge case: this Db2-specific grammar (antlr/grammars-v4's
-sql/db2) has no parser-level path at all for two constructs Rule 1 needs
-to cover (see extractor_visitor.py's module docstring for why):
+sql/db2) has no parser-level path at all for two constructs sensitive-column
+comparison detection needs to cover (see extractor_visitor.py's module
+docstring for why):
 
 1. A bare '(' before a literal (`ACCT_ID ('0000001')`, a DB2/embedded-SQL
    quirk, likely a dropped IN) -- `expression` requires a real
@@ -113,7 +114,7 @@ def make_token_scan_fallback(columns, sink):
         # window -- otherwise a malformed/truncated fragment left behind
         # in a comment (e.g. "ctrt_no in ('0000099'" with no closing ')'
         # anywhere) would match on proximity alone and produce a false
-        # HIT.
+        # finding.
         #
         # Also stop (untrusted, no match) at depth 0 if we hit AND/OR or a
         # *second* operator-starter token before finding a literal --

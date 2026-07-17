@@ -52,7 +52,7 @@ class TestBasicHit(unittest.TestCase):
         self.assertEqual(len(name_candidates), 0)
         self.assertEqual(len(hits), 1)
         h = hits[0]
-        self.assertEqual(h["severity"], "HIT")
+        self.assertEqual(h["severity"], "FINDING")
         self.assertEqual(h["column_name"], "ACCT_ID")
         self.assertEqual(h["operator"], "=")
         self.assertEqual(h["value"], "'0000001'")
@@ -65,7 +65,7 @@ class TestOperators(unittest.TestCase):
         hits, name_candidates = scan("02_operators.sql")
         self.assertEqual(len(name_candidates), 0)
         self.assertEqual(len(hits), 8)
-        self.assertTrue(all(h["severity"] == "HIT" for h in hits))
+        self.assertTrue(all(h["severity"] == "FINDING" for h in hits))
 
         ops = [h["operator"] for h in hits]
         values = set(h["value"] for h in hits)
@@ -124,14 +124,14 @@ class TestComments(unittest.TestCase):
         by_value = {h["value"]: h for h in hits}
         self.assertEqual(set(by_value), {"'0000040'", "'0000041'", "'0000042'"})
 
-        self.assertEqual(by_value["'0000040'"]["severity"], "HIT")
+        self.assertEqual(by_value["'0000040'"]["severity"], "FINDING")
         self.assertEqual(by_value["'0000040'"]["in_comment"], "Y")
 
-        self.assertEqual(by_value["'0000041'"]["severity"], "HIT")
+        self.assertEqual(by_value["'0000041'"]["severity"], "FINDING")
         self.assertEqual(by_value["'0000041'"]["in_comment"], "Y")
         self.assertEqual(by_value["'0000041'"]["line"], 6)
 
-        self.assertEqual(by_value["'0000042'"]["severity"], "HIT")
+        self.assertEqual(by_value["'0000042'"]["severity"], "FINDING")
         self.assertEqual(by_value["'0000042'"]["in_comment"], "N")
 
 
@@ -147,21 +147,21 @@ class TestKoreanNames(unittest.TestCase):
         hits, name_candidates = scan("05_korean_names.sql", known_names={"홍길동"})
         self.assertEqual(len(hits), 1)
         h = hits[0]
-        self.assertEqual(h["severity"], "HIT")
+        self.assertEqual(h["severity"], "FINDING")
         self.assertEqual(h["column_name"], "-")
         self.assertEqual(h["operator"], "-")
         self.assertEqual(h["value"], "'홍길동'")
         self.assertEqual(name_candidates, ["강남구"])
 
     def test_stopword_excluded(self):
-        # A stopworded candidate is dropped entirely -- not a HIT, and
+        # A stopworded candidate is dropped entirely -- not a finding, and
         # not left sitting in name_candidates for strings.txt either.
         hits, name_candidates = scan("05_korean_names.sql", stopwords={"강남구"})
         self.assertEqual(len(hits), 0)
         self.assertEqual(name_candidates, ["홍길동"])
 
     def test_known_name_offsets_slice_back_to_original_quoting(self):
-        # A known-name HIT's "value" is always single-quote-normalized even
+        # A known-name finding's "value" is always single-quote-normalized even
         # when the source used double quotes -- masking must never rely on
         # it for the quote character, only on start_offset/end_offset
         # sliced from the original text (see src/mask.py).
@@ -344,9 +344,9 @@ class TestTxtExtension(unittest.TestCase):
 
 class TestMaskingEndToEnd(unittest.TestCase):
     """Stress test for --mask-literals against a fixture combining several
-    finding shapes at once (plain/double-quoted HIT, IN-list, BETWEEN,
+    finding shapes at once (plain/double-quoted finding, IN-list, BETWEEN,
     reversed comparison, bare-paren quirk, nested-paren IN item, single-
-    and double-quoted known-name HITs, a HIT inside a comment) -- see
+    and double-quoted known-name findings, a finding inside a comment) -- see
     tests/fixtures/16_masking_end_to_end.sql. Individual constructs already
     have their own dedicated tests elsewhere; this one exercises the full
     scan -> mask pipeline together, the way --mask-literals is actually
@@ -396,7 +396,7 @@ class TestMaskingEndToEnd(unittest.TestCase):
             masked_text.replace("****", ""))
 
     def test_masking_is_idempotent_on_a_second_pass(self):
-        # Re-scanning an already-masked file still finds the same HIT
+        # Re-scanning an already-masked file still finds the same finding
         # shapes (column/operator against a literal -- the placeholder is
         # still a literal), and re-masking must be a no-op: '****'/'0000'
         # simply mask to themselves.

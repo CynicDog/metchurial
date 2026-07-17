@@ -1,21 +1,22 @@
 # -*- coding: utf-8 -*-
 """Orchestrates a full scan: scan_file() drives one file end to end through
-Rule 1/Rule 2 detection plus the optional reference/relation/function/
-split-select extraction passes; scan_tree() walks a directory tree and
-merges per-file results, optionally across worker processes.
+sensitive-column comparison detection and known-name matching plus the
+optional reference/relation/function/split-select extraction passes;
+scan_tree() walks a directory tree and merges per-file results, optionally
+across worker processes.
 
-Rule 1 (HIT) matches a hardcoded literal against a sensitive column, via a
-tiered ANTLR parse over live code (statement_driver.py, in_comment=N) plus
-an isolated re-parse of each comment's own text (comment_rescan.py,
-in_comment=Y).
+Sensitive-column comparison detection (FINDING) matches a hardcoded literal
+against a sensitive column, via a tiered ANTLR parse over live code
+(statement_driver.py, in_comment=N) plus an isolated re-parse of each
+comment's own text (comment_rescan.py, in_comment=Y).
 
-Rule 2 (HIT) matches a literal's exact text against a curated list rather
-than a heuristic: any 2-4 Hangul-syllable quoted literal (NAME_LITERAL_RE)
-is a name candidate, found via a whole-file regex pass over raw text. A
-candidate in `known_names` becomes a HIT the same way a Rule 1 column
-match does; a candidate in `stopwords` is dropped; everything else is
-returned as `name_candidates`, the still-unclassified pool that feeds
-strings.txt.
+Known-name matching (FINDING) matches a literal's exact text against a
+curated list rather than a heuristic: any 2-4 Hangul-syllable quoted literal
+(NAME_LITERAL_RE) is a name candidate, found via a whole-file regex pass
+over raw text. A candidate in `known_names` becomes a finding the same way a
+comparison-detection column match does; a candidate in `stopwords` is
+dropped; everything else is returned as `name_candidates`, the
+still-unclassified pool that feeds strings.txt.
 """
 
 import bisect
@@ -45,7 +46,7 @@ DEFAULT_EXTENSIONS = ["sql", "txt"]
 # Cap on a Markdown/TSV snippet's length (one source line, already).
 SNIPPET_MAX_LEN = 160
 
-# Rule 2's name-candidate shape filter: 2-4 hangul syllables inside quotes.
+# Known-name matching's name-candidate shape filter: 2-4 hangul syllables inside quotes.
 # Not a heuristic itself -- just what makes a literal "name-shaped" enough
 # to be worth checking against known_names.txt/stopwords.txt at all.
 NAME_LITERAL_RE = re.compile(r"""['"]([가-힣]{2,4})['"]""")
@@ -62,7 +63,8 @@ def _is_blank_literal(value):
 
 def _line_offsets(text):
     """Return the 0-based character offset where each line starts, used to
-    map a Rule 2 regex match's character position back to a line number."""
+    map a known-name-matching regex match's character position back to a
+    line number."""
     offsets = [0]
     offsets.extend(m.end() for m in re.finditer("\n", text))
     return offsets
@@ -89,10 +91,10 @@ def scan_file(path, columns, stopwords, known_names=None,
     """Scan one file. Returns (hits, name_candidates, refs, relation_edges,
     select_block_count, function_calls, bad_reason).
 
-    `known_names`/`stopwords` (sets of literal text) drive Rule 2: a
-    name-shaped literal in `known_names` becomes a HIT; `name_candidates`
-    is every name-shaped literal in neither set, still awaiting triage
-    (see write_strings_file).
+    `known_names`/`stopwords` (sets of literal text) drive known-name
+    matching: a name-shaped literal in `known_names` becomes a finding;
+    `name_candidates` is every name-shaped literal in neither set, still
+    awaiting triage (see write_strings_file).
 
     `max_iterations_per_chunk` caps the tiered parse driver's per-chunk
     resync loop (statement_driver.py); exposed here so cli.py's
@@ -168,7 +170,7 @@ def _scan_file_body(path, text, enc, columns, stopwords, known_names, max_iterat
         if _is_blank_literal(value):
             return
         hits.append({
-            "severity": "HIT",
+            "severity": "FINDING",
             "file": path,
             "line": line,
             "column_name": column.upper(),
@@ -272,7 +274,7 @@ def _scan_file_body(path, text, enc, columns, stopwords, known_names, max_iterat
         pos = m.start()
         ln = _line_of(offsets, pos)
         if ln in seen_hit_lines:
-            continue  # already reported as a HIT on this line
+            continue  # already reported as a finding on this line
         word = m.group(1)
         if word in known_names:
             # m.end() is exclusive; -1 converts to the 0-based

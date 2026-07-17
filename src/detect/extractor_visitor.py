@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """Walks a successfully-parsed Db2 SQL fragment (a sql_statement or a bare
 search_condition, produced by statement_driver.py's tiered resync loop)
-and emits (column, operator, value, line) tuples for each Rule 1 HIT.
+and emits (column, operator, value, line) tuples for each
+sensitive-column comparison detection finding.
 
 Grammar notes (see docs/PROVENANCE.md):
 
@@ -113,7 +114,7 @@ class ExtractorVisitor(Db2ParserVisitor):
     def __init__(self, columns, sink):
         """columns: iterable of sensitive column names (any case).
         sink: callable(column, operator, value, line, start_offset,
-        end_offset) invoked once per raw HIT-candidate. Blank-literal
+        end_offset) invoked once per raw finding candidate. Blank-literal
         filtering and severity/file/snippet assembly happen in scan.py,
         not here."""
         self.columns = {c.upper() for c in columns}
