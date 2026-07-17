@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""SQL query identification (--extract-metadata, issue #8): assigns each
+"""SQL query identification (--extract-metadata): assigns each
 SQL statement a `core_id` -- a hash of its structural signature -- so
 statements that differ only in column aliasing, SELECT-list projection,
 or how a derived column is calculated collapse to the same id, while
@@ -21,7 +21,7 @@ formatting variation.
 Deliberately excluded from the signature: the SELECT list (aliasing,
 column count, and derived-column calculation all live there -- excluding
 it is what makes those three differences collapse to the same id, by
-construction, per the issue's own definition) and every literal value
+construction) and every literal value
 (two statements filtering the same column with the same operator but
 different literal values are still the same core query, the same
 normalize-the-literal-away principle pt-fingerprint/pg_stat_statements
@@ -35,25 +35,10 @@ per statement (chunk):
    names themselves already excluded, see table_scan.py).
 2. Join-type multiset -- from table_scan.scan_join_edges, canonicalized
    (JOIN/INNER/COMMA all collapse to one "INNER" bucket; LEFT/RIGHT/FULL/
-   CROSS kept distinct) and counted, e.g. "JOINTYPE|INNER=2". This module
-   never trusts scan_join_edges for *pairing* -- only for this coarse
-   join-type count -- which turned out to matter for a real, separate
-   reason found while building this: `_apply_table_list` used to assign a
-   connector's table pair *positionally* (entries[k]/entries[k+1] in
-   FROM-clause order) rather than from what its own ON-clause predicate
-   actually says, mislabeling a "hub table" pattern (`FROM a JOIN b ON
-   a.x=b.x JOIN c ON a.y=c.y`, where `c` really joins to `a`, not `b`).
-   That's now fixed directly in table_scan.py (`_resolve_pair_from_
-   predicate` -- derives the real pair from the predicate's own
-   qualifiers when resolvable, falling back to position only when it
-   isn't, e.g. a USING clause's bare column list) -- a real correctness
-   fix for relations.py's already-shipped refs_relations.tsv output too,
-   not just this module. This module's own relationship pairing (3 below)
-   was always independently correct regardless, since it was never built
-   on scan_join_edges' pairing in the first place -- so nothing here
-   needed to change once table_scan.py was fixed, but the join-type
-   count and the relationship facts are now consistent with each other
-   for the same reason, not just individually correct.
+   CROSS kept distinct) and counted, e.g. "JOINTYPE|INNER=2". Only this
+   coarse join-type count is taken from scan_join_edges; table-pair
+   identity comes exclusively from (3) below, whose resolve_qualifier-
+   based resolution is position-independent by construction.
 3. Relationship/predicate facts -- a new _PredicateFactVisitor (tree-
    walking, modeled on relations.py's _JoinPredicateVisitor: same
    resolve_qualifier-based alias resolution, so table-pair identity here
@@ -67,11 +52,11 @@ per statement (chunk):
      covers join-type identity as a separate, decoupled signal, so the
      two together still distinguish e.g. a LEFT-vs-INNER flip on
      otherwise-identical relationships without needing precise per-edge
-     join_type-to-pair correlation -- confirmed sufficient against
-     issue #8's fixture corpus, see tests/test_query_identity.py).
+     join_type-to-pair correlation -- pinned by the fixture corpus in
+     tests/test_query_identity.py).
    - A single-operand filter predicate (comparison/BETWEEN/LIKE/IS NULL/
-     IN, dispatched via function_visitor.classify_predicate's existing
-     shape-classification logic) where the column-shaped operand resolves
+     IN, dispatched via src.predicates.classify_predicate) where the
+     column-shaped operand resolves
      to a real table is a filter fact: "PRED|table.col|op" -- the literal/
      value side is never inspected.
    - Any operand that isn't a resolvable field_reference (bare unqualified
@@ -80,12 +65,12 @@ per statement (chunk):
      already uses. A predicate whose only column-shaped operand is inside
      a correlated subquery and refers to an *outer* query's alias also
      doesn't resolve (resolve_qualifier only checks the innermost
-     enclosing block's own alias_map, not parent scopes) -- this is
-     deliberate, not a bug: it's exactly what makes a JOIN-based filter
-     and a semantically-similar correlated-EXISTS-subquery rewrite of the
-     same filter produce different signatures (issue #8's documented
-     non-goal -- proving semantic equivalence across those two forms is a
-     fundamentally different, harder problem than structural comparison).
+     enclosing block's own alias_map, not parent scopes) -- deliberate:
+     it's what makes a JOIN-based filter and a semantically-similar
+     correlated-EXISTS-subquery rewrite of the same filter produce
+     different signatures (proving semantic equivalence across those two
+     forms is a non-goal -- a fundamentally different, harder problem
+     than structural comparison).
    - A JOIN's `USING (...)` column list produces no comparison predicate
      in the tree at all (it's a bare column list, not a search_condition)
      -- such a join contributes no relationship fact here, a known,
@@ -97,9 +82,8 @@ is contractually zero-third-party, see tests/test_bundle.py, so no tree-
 edit-distance library) over each distinct core_id's representative fact
 set, computed once, corpus-wide, after a full scan_tree() completes (see
 compute_similarity) -- not per-file, and not pairwise over every
-individual statement: given the issue's own framing ("thousands of
-files, a few dozen actual queries"), this is O(unique-core-ids^2), not
-O(files^2).
+individual statement: the corpus shape is thousands of files but a few
+dozen distinct queries, so this is O(unique-core-ids^2), not O(files^2).
 """
 
 import hashlib
@@ -107,8 +91,9 @@ import hashlib
 from Db2Parser import Db2Parser
 from Db2ParserVisitor import Db2ParserVisitor
 
+from src.predicates import COMPARISON_OPS, classify_predicate, subject_expression
 from src.references import table_scan
-from src.references.function_visitor import classify_predicate
+from src.report import write_refs_tsv
 
 _JOIN_TYPE_CANON = {
     "JOIN": "INNER", "INNER": "INNER", "COMMA": "INNER",
@@ -154,19 +139,13 @@ class _PredicateFactVisitor(Db2ParserVisitor):
         return self.visitChildren(ctx)
 
     def _handle_predicate(self, ctx, op):
-        exprs = ctx.expression()
-        if op in ("=", "<>", "<", ">", "<=", ">="):
+        if op in COMPARISON_OPS:
+            exprs = ctx.expression()
             self._handle_comparison(exprs[0], exprs[1], op)
             return
-        if op in ("BETWEEN", "NOT BETWEEN", "IS NULL", "IS NOT NULL"):
-            self._handle_single(exprs[0], op)
-            return
-        if op in ("LIKE", "NOT LIKE"):
-            self._handle_single(ctx.me, op)
-            return
-        if op in ("IN", "NOT IN"):
-            self._handle_single(ctx.e, op)
-            return
+        subject = subject_expression(ctx, op)
+        if subject is not None:
+            self._handle_single(subject, op)
 
     def _handle_comparison(self, left_ctx, right_ctx, op):
         left = _resolve_field_reference(left_ctx, self.query_blocks)
@@ -266,14 +245,7 @@ def compute_similarity(identity_rows, threshold=0.5):
 
 
 def write_similarity_tsv(path, similarity_rows):
-    """Same TSV conventions as relations.write_relations_tsv (utf-8-sig,
+    """Same TSV conventions as report.write_refs_tsv (utf-8-sig,
     tab-separated, header row always written even for an empty list)."""
-    headers = ["core_id_a", "core_id_b", "similarity", "shared_facts"]
-
-    def clean(v):
-        return str(v).replace("\t", " ").replace("\r", " ").replace("\n", " ")
-
-    with open(path, "w", encoding="utf-8-sig", newline="") as out:
-        out.write("\t".join(headers) + "\n")
-        for row in similarity_rows:
-            out.write("\t".join(clean(row[h]) for h in headers) + "\n")
+    write_refs_tsv(path, ["core_id_a", "core_id_b", "similarity", "shared_facts"],
+                   similarity_rows)

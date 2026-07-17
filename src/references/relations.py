@@ -18,17 +18,12 @@ Two sources of join edges feed into this:
    resolve, via table_scan.resolve_qualifier, to two distinct real tables
    in the same query block. This is the sole source for comma-joins (see
    above), and also independently catches an explicit JOIN's own
-   ON-clause. Before issue #4 / commit 7fea4c8 fixed the grammar's JOIN
-   parse path, an ON-clause's search_condition was unreachable from
-   Tier 1's tree at all and only ever surfaced as an orphaned fragment via
-   statement_driver's Tier 2 resync; now that ANSI JOINs parse as one
-   clean Tier-1 tree, the same visitor finds the ON-clause's comparison as
-   an ordinary descendant of that tree instead. Either way, scan.py's
-   pre_chunk_hook dedupes that case against source 1's non-comma edges for
-   the same table pair in the same chunk, a coarser chunk-level dedup (not
-   exact-predicate matching) that trades undercounting a rare, genuinely
-   separate redundant WHERE-equality for the same pair against
-   overcounting every ordinary JOIN.
+   ON-clause comparison as an ordinary descendant of the committed tree.
+   scan.py's pre_chunk_hook dedupes that case against source 1's
+   non-comma edges for the same table pair in the same chunk -- a coarser
+   chunk-level dedup (not exact-predicate matching) that trades
+   undercounting a rare, genuinely separate redundant WHERE-equality for
+   the same pair against overcounting every ordinary JOIN.
 
 A comma-joined pair with no WHERE condition linking it at all (a rare,
 degenerate cross-join) goes unrecorded entirely -- a documented
@@ -38,7 +33,9 @@ limitation, not a silent wrong answer.
 from Db2Parser import Db2Parser
 from Db2ParserVisitor import Db2ParserVisitor
 
+from src.predicates import COMPARISON_OPS, classify_predicate
 from src.references import table_scan
+from src.report import write_refs_tsv
 
 
 class _JoinPredicateVisitor(Db2ParserVisitor):
@@ -53,10 +50,10 @@ class _JoinPredicateVisitor(Db2ParserVisitor):
         self.sink = sink
 
     def visitPredicate(self, ctx: Db2Parser.PredicateContext):
-        exprs = ctx.expression()
-        op_ctx = ctx.comparison_operator()
-        if op_ctx is not None and len(exprs) == 2 and ctx.some_any_all() is None:
-            self._handle_comparison(exprs[0], exprs[1], op_ctx.getText(), ctx.start.line)
+        op = classify_predicate(ctx)
+        if op in COMPARISON_OPS:
+            exprs = ctx.expression()
+            self._handle_comparison(exprs[0], exprs[1], op, ctx.start.line)
         return self.visitChildren(ctx)
 
     def _handle_comparison(self, left, right, operator, line):
@@ -128,17 +125,11 @@ def aggregate_edges(edges):
 
 
 def write_relations_tsv(path, aggregated):
-    """Same TSV conventions as report.py (utf-8-sig, tab-separated, header
-    row always written even for an empty `aggregated` list)."""
+    """Same TSV conventions as report.write_refs_tsv (utf-8-sig,
+    tab-separated, header row always written even for an empty
+    `aggregated` list); each row's distinct predicates are joined with
+    '; ' into one column."""
     headers = ["table_a_schema", "table_a", "table_b_schema", "table_b",
-              "join_count", "predicates"]
-
-    def clean(v):
-        return str(v).replace("\t", " ").replace("\r", " ").replace("\n", " ")
-
-    with open(path, "w", encoding="utf-8-sig", newline="") as out:
-        out.write("\t".join(headers) + "\n")
-        for row in aggregated:
-            values = [row["table_a_schema"], row["table_a"], row["table_b_schema"],
-                     row["table_b"], row["join_count"], "; ".join(row["predicates"])]
-            out.write("\t".join(clean(v) for v in values) + "\n")
+               "join_count", "predicates"]
+    rows = [dict(row, predicates="; ".join(row["predicates"])) for row in aggregated]
+    write_refs_tsv(path, headers, rows)

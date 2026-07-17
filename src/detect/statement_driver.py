@@ -48,13 +48,16 @@ from antlr4.error.ErrorListener import ErrorListener
 from Db2Lexer import Db2Lexer
 from Db2Parser import Db2Parser
 
-# Safety valve cap: max loop iterations per chunk, so a pathological chunk
-# (e.g. a huge bulk-insert VALUES list the grammar can't make sense of)
-# can't spin the resync loop indefinitely.
+# Runtime bound, not a termination guarantee: the resync loop always
+# advances (Tier 3 skips at least one token per iteration), but each
+# iteration can cost up to two full parse attempts, so an enormous
+# unparseable chunk (e.g. a huge bulk-insert VALUES list the grammar can't
+# make sense of) would otherwise take quadratic time. Tunable via
+# --max-chunk-iterations.
 MAX_ITERATIONS_PER_CHUNK = 200000
 
-# No HAVING token exists in this grammar (checked: not defined in
-# Db2Lexer.g4) -- WHERE/ON are the only resync anchors available.
+# Db2Lexer.g4 defines no HAVING token -- WHERE/ON are the only resync
+# anchors available.
 _RESYNC_KEYWORDS = (Db2Lexer.WHERE, Db2Lexer.ON)
 
 
@@ -157,8 +160,8 @@ def parse_chunk(all_tokens, start, end, visitor, token_scan_fallback,
     `(consumed_count, commit_or_None)` -- `commit` is only invoked if this
     candidate wins the race (see module docstring for why a plain
     "try structural parses first, fall back to token-scan last" ordering
-    is not reliable here). `max_iterations` is the per-chunk safety-valve
-    cap (see MAX_ITERATIONS_PER_CHUNK); exposed as a parameter so callers
+    is not reliable here). `max_iterations` is the per-chunk runtime cap
+    (see MAX_ITERATIONS_PER_CHUNK); exposed as a parameter so callers
     (ultimately --max-chunk-iterations on the CLI) can tune it.
     `extra_visitors` -- additional visitor(s) (e.g. reference_visitor.py's
     ReferenceVisitor) that also get `.visit(tree)` called on every tree
@@ -245,11 +248,15 @@ def parse_chunk(all_tokens, start, end, visitor, token_scan_fallback,
 
 def parse_file(text, visitor, token_scan_fallback,
                max_iterations_per_chunk=MAX_ITERATIONS_PER_CHUNK,
-               pre_chunk_hook=None):
+               pre_chunk_hook=None, lexed=None):
     """Top-level entry point: lex once, split into chunks, run the tiered
     driver over each. Returns (all_tokens, lexer_errors) so callers (e.g.
     scan.py for in_comment findings) can reuse the same token stream for
     comment-token inspection without re-lexing.
+    `lexed`, if given, is a prior lex_file(text) result -- an
+    (all_tokens, lexer_errors) tuple for this same `text` -- and skips the
+    internal lex (lexing is deterministic and nothing here mutates the
+    token list, so the result is identical either way).
     `pre_chunk_hook(all_tokens, start, end) -> tuple_of_extra_visitors`,
     if given, is called once per chunk *before* that chunk's tiered loop
     runs, using the same already-lexed `all_tokens`/chunk range (no
@@ -260,7 +267,7 @@ def parse_file(text, visitor, token_scan_fallback,
     comment_rescan.py's own parse_file() calls don't pass this, so
     reference/relation extraction inside comments is out of scope, a
     known limitation."""
-    all_tokens, lexer_errors = lex_file(text)
+    all_tokens, lexer_errors = lexed if lexed is not None else lex_file(text)
     for start, end in chunk_ranges(all_tokens):
         extra_visitors = pre_chunk_hook(all_tokens, start, end) if pre_chunk_hook else ()
         parse_chunk(all_tokens, start, end, visitor, token_scan_fallback,

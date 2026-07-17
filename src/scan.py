@@ -49,9 +49,13 @@ DEFAULT_EXTENSIONS = ["sql", "txt"]
 # Cap on a Markdown/TSV snippet's length (one source line, already).
 SNIPPET_MAX_LEN = 160
 
-# Known-name matching's name-candidate shape filter: 2-4 hangul syllables inside quotes.
-# Not a heuristic itself -- just what makes a literal "name-shaped" enough
-# to be worth checking against known_names.txt/stopwords.txt at all.
+# Known-name matching's name-candidate shape filter: 2-4 hangul syllables
+# inside quotes. Deliberately applied to the raw file text, not the token
+# stream: the spec is "name-shaped quoted text anywhere in the file",
+# which includes text inside comment tokens and inside regions the lexer
+# couldn't cleanly tokenize -- neither of which surfaces as a
+# STRING_LITERAL token. Comment-ness is reconciled afterwards against the
+# lexer's comment-token spans (see in_comment below).
 NAME_LITERAL_RE = re.compile(r"""['"]([가-힣]{2,4})['"]""")
 
 
@@ -69,7 +73,10 @@ def _line_offsets(text):
     map a known-name-matching regex match's character position back to a
     line number."""
     offsets = [0]
-    offsets.extend(m.end() for m in re.finditer("\n", text))
+    pos = text.find("\n")
+    while pos != -1:
+        offsets.append(pos + 1)
+        pos = text.find("\n", pos + 1)
     return offsets
 
 
@@ -148,13 +155,12 @@ def scan_file(path, columns, stopwords, known_names=None,
         reason = "cannot read: {}: {}".format(type(e).__name__, e)
         return hits, name_candidates, refs, relation_edges, 0, function_calls, [], reason
 
-    # Cheap pre-check: lex once up front (parse_file lexes again
-    # internally for the tiered driver -- lexing is a fast single linear
-    # pass, so the small duplicate cost is worth keeping this check simple
-    # and decoupled). Catches the common case (heavy non-SQL noise) before
-    # spending any time in the expensive tiered driver at all.
-    precheck_tokens, precheck_lexer_errors = lex_file(text)
-    bad_reason = check_file_quality(precheck_tokens, precheck_lexer_errors)
+    # Cheap lex-only quality gate: catches the common case (heavy non-SQL
+    # noise) before spending any time in the expensive tiered driver. The
+    # lex result is threaded through to parse_file so each file is lexed
+    # exactly once.
+    lexed = lex_file(text)
+    bad_reason = check_file_quality(*lexed)
     if bad_reason is not None:
         return hits, name_candidates, refs, relation_edges, 0, function_calls, [], bad_reason
 
@@ -162,7 +168,7 @@ def scan_file(path, columns, stopwords, known_names=None,
         return _scan_file_body(path, text, enc, columns, stopwords, known_names,
                                max_iterations_per_chunk, extract_table_refs, extract_column_refs,
                                extract_relations, split_select, extract_functions,
-                               extract_query_identity)
+                               extract_query_identity, lexed)
     except Exception as e:
         reason = "crashed while scanning: {}: {}".format(type(e).__name__, e)
         return [], [], [], [], 0, [], [], reason
@@ -170,7 +176,7 @@ def scan_file(path, columns, stopwords, known_names=None,
 
 def _scan_file_body(path, text, enc, columns, stopwords, known_names, max_iterations_per_chunk,
                     extract_table_refs, extract_column_refs, extract_relations, split_select,
-                    extract_functions=False, extract_query_identity=False):
+                    extract_functions=False, extract_query_identity=False, lexed=None):
     """Runs the actual scan; split out from scan_file() so its try/except
     wraps one simple call. Everything below assumes well-formed input --
     it isn't itself defensive."""
@@ -281,7 +287,7 @@ def _scan_file_body(path, text, enc, columns, stopwords, known_names, max_iterat
 
     all_tokens, _lexer_errors = parse_file(
         text, visitor, fallback, max_iterations_per_chunk=max_iterations_per_chunk,
-        pre_chunk_hook=pre_chunk_hook)
+        pre_chunk_hook=pre_chunk_hook, lexed=lexed)
 
     # Only safe to finalize now -- every chunk's predicate_visitor has
     # seen every committed fragment of its own chunk by the time

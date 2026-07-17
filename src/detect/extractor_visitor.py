@@ -10,9 +10,9 @@ Grammar notes (see docs/PROVENANCE.md):
   single, unlabeled `predicate` rule (antlr/grammars-v4's sql/db2 grammar),
   so the generated PredicateContext class merges 20+ alternatives into one
   set of accessors -- which alt actually fired is determined by checking
-  which accessor methods are non-None (see visitPredicate below), not by
-  dispatching on subclass. Verified empirically against the real generated
-  parser (see tests/test_grammar_smoke.py).
+  which accessor methods are non-None (src.predicates.classify_predicate),
+  not by dispatching on subclass. Pinned by tests/test_grammar_smoke.py
+  against the real generated parser.
 - `expression`'s leaf alternatives (`column_name`, `constant_`) are direct
   children of ExpressionContext, with no multi-level passthrough chain to
   collapse through. as_column()/as_literal() below inspect the operand
@@ -46,6 +46,8 @@ Grammar notes (see docs/PROVENANCE.md):
 
 from Db2Parser import Db2Parser
 from Db2ParserVisitor import Db2ParserVisitor
+
+from src.predicates import COMPARISON_OPS, classify_predicate
 
 
 def _unwrap_parens(ctx):
@@ -124,21 +126,17 @@ class ExtractorVisitor(Db2ParserVisitor):
         self.sink(column, operator, value, anchor_token.line, span[0], span[1])
 
     def visitPredicate(self, ctx: Db2Parser.PredicateContext):
+        op = classify_predicate(ctx)
         exprs = ctx.expression()
 
-        op_ctx = ctx.comparison_operator()
-        if op_ctx is not None and len(exprs) == 2 and ctx.some_any_all() is None:
-            self._handle_comparison(exprs[0], exprs[1], op_ctx.getText())
-
-        elif ctx.BETWEEN() is not None and len(exprs) == 3:
-            self._handle_between(exprs, ctx)
-
-        elif (ctx.IN() is not None and ctx.cursor_variable_name() is None
-              and ctx.DISTINCT() is None and len(exprs) >= 1):
-            self._handle_in(exprs, ctx)
-
-        elif ctx.LIKE() is not None and len(exprs) >= 2:
-            self._handle_like(exprs, ctx)
+        if op in COMPARISON_OPS:
+            self._handle_comparison(exprs[0], exprs[1], op)
+        elif op in ("BETWEEN", "NOT BETWEEN") and len(exprs) == 3:
+            self._handle_between(exprs, ctx, op)
+        elif op in ("IN", "NOT IN") and len(exprs) >= 1:
+            self._handle_in(exprs, ctx, op)
+        elif op in ("LIKE", "NOT LIKE") and len(exprs) >= 2:
+            self._handle_like(exprs, ctx, op)
 
         return self.visitChildren(ctx)
 
@@ -154,22 +152,20 @@ class ExtractorVisitor(Db2ParserVisitor):
             left_val, left_span = left_lit
             self._emit(right_col, operator, left_val, left.start, left_span)
 
-    def _handle_between(self, exprs, ctx):
+    def _handle_between(self, exprs, ctx, operator):
         col = as_column(exprs[0], self.columns)
         if not col:
             return
-        operator = "NOT BETWEEN" if ctx.NOT() is not None else "BETWEEN"
         for value_ctx in (exprs[1], exprs[2]):
             lit = as_literal(value_ctx)
             if lit is not None:
                 val, span = lit
                 self._emit(col, operator, val, ctx.start, span)
 
-    def _handle_in(self, exprs, ctx):
+    def _handle_in(self, exprs, ctx, operator):
         col = as_column(exprs[0], self.columns)
         if not col:
             return
-        operator = "NOT IN" if ctx.NOT() is not None else "IN"
         if ctx.fullselect_in_parentheses() is not None:
             return  # scoping: subquery's own literals are independently
                      # visited via visitChildren(), never attributed here
@@ -189,12 +185,11 @@ class ExtractorVisitor(Db2ParserVisitor):
                 val, span = lit
                 self._emit(col, operator, val, ctx.start, span)
 
-    def _handle_like(self, exprs, ctx):
+    def _handle_like(self, exprs, ctx, operator):
         col = as_column(exprs[0], self.columns)
         if not col:
             return
         lit = as_literal(exprs[1])
         if lit is not None:
             val, span = lit
-            operator = "NOT LIKE" if ctx.NOT() is not None else "LIKE"
             self._emit(col, operator, val, ctx.start, span)

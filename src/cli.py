@@ -77,11 +77,13 @@ def main(argv=None):
                         "other than being merged in completion order.")
     ap.add_argument("--max-chunk-iterations", type=int, default=MAX_ITERATIONS_PER_CHUNK,
                     metavar="N",
-                    help="Per-statement-chunk safety-valve cap on the ANTLR resync "
-                        "driver's loop iterations, so a pathological chunk the grammar "
-                        "can't make sense of can't spin indefinitely (default: %(default)s). "
-                        "Does not affect the token-adjacency fallback (bare '(' / "
-                        "double-quoted literals) -- see README's Known Limitations.")
+                    help="Per-statement-chunk runtime cap on the ANTLR resync driver's "
+                        "loop iterations -- bounds the time spent on an enormous chunk "
+                        "the grammar can't make sense of, whose retry-per-token cost "
+                        "would otherwise grow quadratically with chunk size "
+                        "(default: %(default)s). Does not affect the token-adjacency "
+                        "fallback (bare '(' / double-quoted literals) -- see README's "
+                        "Known Limitations.")
     ap.add_argument("--extract-metadata", action="store_true",
                     help="Emit refs_tables.tsv/refs_columns.tsv (every schema.table and "
                         "schema.table.column reference found), refs_relations.tsv (table-to-table "

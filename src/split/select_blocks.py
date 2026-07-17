@@ -2,22 +2,15 @@
 """Standalone SELECT-block counting and splitting (--split-selects).
 
 A "select block" is one semicolon-delimited top-level chunk (reusing
-statement_driver.chunk_ranges()'s existing top-level-';'-at-paren-depth-0
+statement_driver.chunk_ranges()'s top-level-';'-at-paren-depth-0
 splitting) that starts with (an optional `WITH <cte-list>` prologue, then)
 SELECT. Classification is a cheap, purely token-level pass with no parser
-involvement at all, mirroring table_scan.find_cte_names' own WITH-list
-walk (paren-depth tracking), just checking what follows instead of
-collecting names.
-
-This token-level approach originally sidestepped a related grammar bug
-entirely rather than patching it: a CTE's own body SELECT used to get
-independently re-surfaced by the tiered parsing driver as if it were its
-own standalone top-level statement (see table_scan.py's module docstring;
-**fixed** in issue #4 / commit 7fea4c8). The CTE prologue and the SELECT
-that consumes it were already the same chunk by construction regardless of
-that bug, so this module's chunk-level classification needed no change
-when the grammar was fixed -- it was never depending on the tree parsing
-correctly in the first place.
+involvement at all, mirroring table_scan.find_cte_names' WITH-list walk
+(paren-depth tracking), just checking what follows instead of collecting
+names -- so it works identically whether or not the parser can build a
+tree for the chunk. A CTE prologue and the SELECT that consumes it are
+always the same chunk by construction (a WITH clause contains no
+top-level ';').
 """
 
 import os
@@ -27,29 +20,10 @@ from antlr4.Token import Token
 
 from Db2Lexer import Db2Lexer
 
+from src.token_walk import skip_balanced_parens as _skip_balanced_parens
+from src.token_walk import skip_hidden as _skip_hidden
+
 _SPLIT_SUFFIX_RE = re.compile(r"-\d{2,}(\.[^.]+)?$")
-
-
-def _skip_hidden(tokens, i, n):
-    while i < n and tokens[i].channel != Token.DEFAULT_CHANNEL:
-        i += 1
-    return i if i < n else None
-
-
-def _skip_balanced_parens(tokens, open_idx):
-    depth = 0
-    n = len(tokens)
-    i = open_idx
-    while i < n:
-        t = tokens[i].type
-        if t == Db2Lexer.LEFT_RND_BKT:
-            depth += 1
-        elif t == Db2Lexer.RIGHT_RND_BKT:
-            depth -= 1
-            if depth == 0:
-                return i + 1
-        i += 1
-    return n
 
 
 def classify_chunk(all_tokens, start, end):

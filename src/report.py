@@ -357,22 +357,24 @@ def write_strings_file(path, name_candidates):
             out.write("{}   # {} occurrence(s)\n".format(word, counts[word]))
 
 
+def _clean(v):
+    """One TSV field: tabs/newlines inside a field would break TSV columns."""
+    return str(v).replace("\t", " ").replace("\r", " ").replace("\n", " ")
+
+
 def write_refs_tsv(path, headers, rows):
     """Generic TSV writer for the --extract-metadata artifacts
-    (refs_tables.tsv, refs_columns.tsv, refs_functions.tsv), same
-    conventions as write_tsv_report (utf-8-sig, tab-separated, header row
-    always written even for an empty `rows` list, clean() stripping
-    embedded tabs/newlines that would otherwise break a TSV column).
+    (refs_tables.tsv, refs_columns.tsv, refs_functions.tsv,
+    refs_relations.tsv, refs_query_*.tsv), same conventions as
+    write_tsv_report (utf-8-sig, tab-separated, header row always written
+    even for an empty `rows` list, embedded tabs/newlines stripped).
     `rows` is a list of dicts; only the keys named in `headers` are
     written, in that order -- generic over each file's differing column
     set (refs_tables.tsv has no "column" field, refs_columns.tsv does)."""
-    def clean(v):
-        return str(v).replace("\t", " ").replace("\r", " ").replace("\n", " ")
-
     with open(path, "w", encoding="utf-8-sig", newline="") as out:
         out.write("\t".join(headers) + "\n")
         for row in rows:
-            out.write("\t".join(clean(row[h]) for h in headers) + "\n")
+            out.write("\t".join(_clean(row[h]) for h in headers) + "\n")
 
 
 def write_tsv_report(path, findings):
@@ -383,14 +385,10 @@ def write_tsv_report(path, findings):
     headers = ["severity", "in_comment", "directory", "file_name", "line",
                "column_name", "operator", "value", "snippet"]
 
-    def clean(v):
-        # tabs/newlines inside a field would break TSV columns
-        return str(v).replace("\t", " ").replace("\r", " ").replace("\n", " ")
-
     with open(path, "w", encoding="utf-8-sig", newline="") as out:
         out.write("\t".join(headers) + "\n")
         for f in findings:
             directory, file_name = os.path.split(f["file"])
             row = [f["severity"], f["in_comment"], directory, file_name, f["line"],
                    f["column_name"], f["operator"], f["value"], f["snippet"]]
-            out.write("\t".join(clean(v) for v in row) + "\n")
+            out.write("\t".join(_clean(v) for v in row) + "\n")

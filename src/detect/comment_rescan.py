@@ -65,7 +65,7 @@ def rescan_comments(all_tokens, columns, sink,
     all the way back to whatever coordinate system the *original* caller's
     `all_tokens` used (see base_offset below). `max_iterations_per_chunk`
     is threaded through to each nested parse_file() call so a recursive
-    re-scan respects the same safety valve as the top-level driver."""
+    re-scan respects the same runtime cap as the top-level driver."""
     for tok in comment_tokens(all_tokens):
         inner_text = _strip_comment_markers(tok)
         if not inner_text or not inner_text.strip():

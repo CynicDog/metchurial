@@ -327,13 +327,14 @@ class TestCteParticipatingJoinEdge(unittest.TestCase):
                          (ts.PLACEHOLDER_SCHEMA, "CTE"))
 
 
-class TestExtractTableRefsOnly(unittest.TestCase):
+class TestMultiStatementTableScan(unittest.TestCase):
     def test_multi_statement_file(self):
         text = ("SELECT * FROM schema1.table1 a WHERE a.col1='1'; "
                 "UPDATE t2 SET x=1; "
                 "SELECT t.c FROM (SELECT c FROM inner_t) t;")
-        refs = ts.extract_table_refs_only(text)
-        tables = {(schema, table) for schema, table, _line in refs}
+        refs = [ref for blocks in _blocks_for(text)
+                for ref in ts.iter_table_refs(blocks)]
+        tables = {(ref.schema, ref.table) for ref in refs}
         self.assertEqual(tables, {("SCHEMA1", "TABLE1"), (ts.PLACEHOLDER_SCHEMA, "T2"),
                                   (ts.PLACEHOLDER_SCHEMA, "INNER_T")})
 

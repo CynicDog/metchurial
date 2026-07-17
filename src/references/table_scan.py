@@ -4,80 +4,50 @@
 relationship extraction both sit on top of. This module never touches the
 parser; it only walks the already-lexed `Token` list (statement_driver.py's
 `lex_file()` output, one chunk's slice at a time) -- same spirit as
-supplementary_checks.py's existing Tier 3 token-scan fallback.
+supplementary_checks.py's Tier 3 token-scan fallback.
 
-This exists as a *separate* pass from the parser because this module needs
-to discover tables/aliases/JOINs regardless of what tier the tiered driver
-resolved a given chunk at, and (as of issue #4 / commit 7fea4c8) uniformly
-across both comma-joins and ANSI `JOIN ... ON`/`USING` chains -- one
-mechanism instead of two. It originally existed to route around a real
-parse-tree gap:
+Table/alias/JOIN discovery is a separate pass from the parser for two
+reasons:
 
-1. Schema-qualified names (`SCHEMA.TABLE`, `SCHEMA.TABLE.COLUMN`) don't
-   parse at all -- `table_name`/`column_name` are always a single
-   unqualified `id_ : ID` (the `ID` token itself contains no dot).
-   `SELECT * FROM schema1.table1;` parses with zero syntax errors, but the
-   tree only ever captures `table_name=schema1` -- `.table1` is silently
-   left unconsumed in the token stream (no error, since `sql_statement()`,
-   what the tiered driver actually calls, is never EOF-anchored). This gap
-   is still open -- tracked in issue #1.
-2. `JOIN ... ON`/`USING` (ANSI join syntax) used to have no parse path at
-   all: `joined_table` was defined in the grammar but its only reference
-   site was commented out (`//| joined_table`), so `FROM t1 a JOIN t2 b ON
-   a.x=b.y` parsed with zero errors but the tree stopped dead after `FROM
-   t1 a`, with `t2 b` shredded one token at a time by the tiered driver's
-   Tier-3 safety valve. **Fixed** in issue #4 / commit 7fea4c8 -- ANSI
-   joins now parse as one clean tree, same as comma-joins always did. This
-   module's token-scan discovery of JOIN edges is kept regardless (see
-   above), but detection (extractor_visitor.py) and column-level
-   extraction (reference_visitor.py) both benefit directly from the fix,
-   since they walk the tree itself rather than re-scanning tokens.
+1. It must work regardless of which tier the tiered driver resolved a
+   given chunk at, uniformly across comma-joins and ANSI
+   `JOIN ... ON`/`USING` chains -- one mechanism instead of two.
+2. Schema-qualified names (`SCHEMA.TABLE`, `SCHEMA.TABLE.COLUMN`) have no
+   parse path in the vendored grammar -- `table_name`/`column_name` are
+   always a single unqualified `id_ : ID` (the `ID` token itself contains
+   no dot). `SELECT * FROM schema1.table1;` parses with zero syntax
+   errors, but the tree only ever captures `table_name=schema1` --
+   `.table1` is silently left unconsumed in the token stream (no error,
+   since `sql_statement()`, what the tiered driver actually calls, is
+   never EOF-anchored). Tracked in issue #1.
 
-CTE names are excluded from the tables this module records (`WITH cte AS
-(...) SELECT * FROM cte` must not report `cte` as a real table) -- but a
-CTE reference still becomes a real `TableRef` (flagged `is_cte=True`), not
-`None`: it needs to resolve via `alias_map` (a later `cte_alias.col` must
-resolve to *something*) and still participate in a `join_connectors` edge
-when an outer query joins to it (`FROM cte_a JOIN cte_b ON ...`) -- a gap
-where such edges were silently dropped entirely, fixed alongside
-query_identity.py, which is the first consumer that needs full join
-topology across CTE scopes. `iter_table_refs`/refs_tables.tsv and
-refs_relations.tsv (see scan.py's pre_chunk_hook) both continue to exclude
-`is_cte` refs, preserving their existing output exactly.
+CTE handling contract: CTE names are excluded from the tables this module
+records (`WITH cte AS (...) SELECT * FROM cte` must not report `cte` as a
+real table) -- but a CTE reference still becomes a real `TableRef`
+(flagged `is_cte=True`), not `None`: it must resolve via `alias_map` (a
+later `cte_alias.col` must resolve to *something*) and still participate
+in a `join_connectors` edge when an outer query joins to it (`FROM cte_a
+JOIN cte_b ON ...`), which query_identity.py's full join topology relies
+on. `iter_table_refs`/refs_tables.tsv and refs_relations.tsv (see
+scan.py's pre_chunk_hook) both exclude `is_cte` refs.
 
-A *separate*, now-fixed issue -- a CTE's body SELECT used to get
-independently re-surfaced by the tiered driver as if it were its own
-standalone top-level statement (also issue #4 / commit 7fea4c8) -- used to
-matter to --split-selects' chunk classification (select_blocks.py); see
-that module's docstring for how it's unaffected either way.
-
-A JOIN connector's table *pair* (as opposed to its predicate text, which
-was always captured correctly) used to be assigned purely by FROM-clause
-*position* (entries[k]/entries[k+1]) rather than from what its own
-ON-clause predicate actually says -- wrong for a "hub table" pattern
-(`FROM a JOIN b ON a.x=b.x JOIN c ON a.y=c.y`, where `c` really joins to
-`a`, not `b`, its immediate FROM-list predecessor). Found and fixed
-alongside query_identity.py, which is the first consumer that needed
-edge pairing to be reliably correct rather than merely a good-enough
-proxy: `_resolve_pair_from_predicate` now derives the real pair from the
-predicate's own qualifiers, resolved via this block's own alias_map, and
-falls back to position only when the predicate doesn't unambiguously
-name exactly two known aliases (a comma-join with no predicate at all, or
-a USING clause's bare unqualified column list). This also directly
-improves refs_relations.tsv's already-shipped output for this pattern,
-not just query_identity.py.
+A JOIN connector's table *pair* is derived from its own ON/USING
+predicate's qualifiers, resolved via the block's alias_map
+(`_resolve_pair`), with FROM-clause position (entries[k]/entries[k+1]) as
+the fallback -- position alone mis-pairs a "hub table" pattern
+(`FROM a JOIN b ON a.x=b.x JOIN c ON a.y=c.y`, where `c` joins to `a`,
+not `b`, its immediate FROM-list predecessor).
 """
-
-import re
 
 from antlr4.Token import Token
 
 from Db2Lexer import Db2Lexer
 
+from src.token_walk import skip_balanced_parens as _skip_balanced_parens
+from src.token_walk import skip_hidden as _skip_hidden
+
 PLACEHOLDER_SCHEMA = "(no-schema)"
 PLACEHOLDER_TABLE = "(no-table)"
-
-_QUALIFIER_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\.")
 
 # Tokens that can never be the next segment of a dotted schema/catalog-
 # qualified name -- everything else immediately after a '.' in a table-
@@ -106,16 +76,12 @@ _JOIN_QUALIFIER_TYPES = {
     Db2Lexer.CROSS: "CROSS",
 }
 
-# Db2Lexer.g4 reserves a handful of single letters as their own lexer
-# tokens rather than plain ID (G/K/M/P/S -- confirmed against the grammar
-# directly) -- extremely common real-world table aliases. The real ANTLR
-# parser tree can't accept one as a correlation_name either (verified
-# empirically: a real grammar limitation, same root cause as issue #1's
-# already-documented "reserved-keyword-colliding alias" item, out of scope
-# to fix at the grammar level here) -- but this module's token-scan is
-# independent of the parser and doesn't need to wait on that: accepting
-# these tokens as aliases here, alongside plain ID, keeps table/alias/JOIN
-# discovery correct for this extremely common pattern regardless.
+# Db2Lexer.g4 reserves the single letters G/K/M/P/S as their own lexer
+# tokens rather than plain ID, yet they are extremely common real-world
+# table aliases (the parser can't accept one as a correlation_name -- a
+# grammar limitation with the same root cause as issue #1's
+# reserved-keyword-colliding alias item). This token-scan is independent
+# of the parser, so it accepts them as aliases alongside plain ID.
 _ALIAS_TOKEN_TYPES = {Db2Lexer.ID, Db2Lexer.G, Db2Lexer.K, Db2Lexer.M, Db2Lexer.P_, Db2Lexer.S_}
 
 
@@ -175,32 +141,6 @@ class JoinEdge(object):
         self.join_type = join_type
         self.predicate_text = predicate_text
         self.line = line
-
-
-def _skip_hidden(tokens, i, n):
-    """Index >= i of the next default-channel token, or None past the end."""
-    while i < n and tokens[i].channel != Token.DEFAULT_CHANNEL:
-        i += 1
-    return i if i < n else None
-
-
-def _skip_balanced_parens(tokens, open_idx):
-    """tokens[open_idx] is a LEFT_RND_BKT. Returns the index right after
-    its matching RIGHT_RND_BKT (or len(tokens) if unbalanced, which
-    shouldn't happen post-lex but is a safe, non-crashing fallback)."""
-    depth = 0
-    n = len(tokens)
-    i = open_idx
-    while i < n:
-        t = tokens[i].type
-        if t == Db2Lexer.LEFT_RND_BKT:
-            depth += 1
-        elif t == Db2Lexer.RIGHT_RND_BKT:
-            depth -= 1
-            if depth == 0:
-                return i + 1
-        i += 1
-    return n
 
 
 def _last_real_token(tokens):
@@ -284,12 +224,25 @@ def _join_token_texts(toks):
     return "".join(out)
 
 
+def _qualifiers_of(parts):
+    """Upper-cased qualifier texts (the token immediately preceding each
+    '.') in source order, e.g. ('A', 'B') for `a.x = b.y`. Chained dotted
+    names contribute every segment before a dot (`s.t.c` -> ('S', 'T'));
+    non-alias segments are filtered out downstream by alias_map lookup."""
+    return tuple(parts[k - 1].text.upper()
+                 for k, t in enumerate(parts)
+                 if t.type == Db2Lexer.DOT and k > 0)
+
+
 def _capture_predicate_text(tokens, start_i, n):
     """Raw source text of a JOIN's ON-clause (or any search-condition-
     shaped fragment), from start_i up to (not including) the next WHERE/
     GROUP/ORDER/JOIN-family-keyword/COMMA/SEMI/EOF at the *current* paren
     depth (relative to start_i, clamped at 0 -- same technique
-    statement_driver.chunk_ranges() uses for top-level ';' splitting)."""
+    statement_driver.chunk_ranges() uses for top-level ';' splitting).
+    Returns (text, qualifiers, next_index) -- `qualifiers` are the
+    predicate's own dotted-name qualifiers (see _qualifiers_of), used by
+    _resolve_pair to derive the connector's real table pair."""
     depth = 0
     parts = []
     i = start_i
@@ -312,16 +265,16 @@ def _capture_predicate_text(tokens, start_i, n):
             break
         parts.append(t)
         i += 1
-    return _join_token_texts(parts), i
+    return _join_token_texts(parts), _qualifiers_of(parts), i
 
 
 def _capture_using_columns_text(tokens, start_i, n):
     i = _skip_hidden(tokens, start_i, n)
     if i is None or tokens[i].type != Db2Lexer.LEFT_RND_BKT:
-        return "", (i if i is not None else n)
+        return "", (), (i if i is not None else n)
     j = _skip_balanced_parens(tokens, i)
     parts = [t for t in tokens[i:j] if t.channel == Token.DEFAULT_CHANNEL]
-    return _join_token_texts(parts), j
+    return _join_token_texts(parts), _qualifiers_of(parts), j
 
 
 def _scan_one_table_ref(tokens, i, cte_names, by_start=None):
@@ -409,8 +362,8 @@ def _scan_table_list(tokens, from_index, cte_names, by_start=None):
     and/or JOIN-connected list of table references. Returns (entries,
     connectors, next_index): `entries` parallels the source order and may
     contain None for a derived-table/CTE slot (see _scan_one_table_ref);
-    `connectors[k]` is (join_type, predicate_text) describing how
-    entries[k] connects to entries[k+1] ("COMMA" has no predicate here --
+    `connectors[k]` is (join_type, predicate_text, qualifiers) describing
+    how entries[k] connects to entries[k+1] ("COMMA" has no predicate here --
     a comma-join's real predicate lives in the WHERE clause, recovered
     separately as a "WHERE-IMPLICIT" edge, see relations.py)."""
     n = len(tokens)
@@ -428,28 +381,28 @@ def _scan_table_list(tokens, from_index, cte_names, by_start=None):
         if tokens[i].type == Db2Lexer.COMMA:
             i = _skip_hidden(tokens, i + 1, n)
             if i is None:
-                connectors.append(("COMMA", ""))
+                connectors.append(("COMMA", "", ()))
                 break
             ref, i = _scan_one_table_ref(tokens, i, cte_names, by_start)
             entries.append(ref)
-            connectors.append(("COMMA", ""))
+            connectors.append(("COMMA", "", ()))
             continue
         join_type = _match_join_qualifier(tokens, i)
         if join_type is not None:
             i = _skip_join_keyword_run(tokens, i, n)
             i = _skip_hidden(tokens, i, n) if i is not None else None
             if i is None:
-                connectors.append((join_type, ""))
+                connectors.append((join_type, "", ()))
                 break
             ref, i = _scan_one_table_ref(tokens, i, cte_names, by_start)
             entries.append(ref)
-            predicate = ""
+            predicate, qualifiers = "", ()
             i2 = _skip_hidden(tokens, i, n)
             if i2 is not None and tokens[i2].type == Db2Lexer.ON:
-                predicate, i = _capture_predicate_text(tokens, i2 + 1, n)
+                predicate, qualifiers, i = _capture_predicate_text(tokens, i2 + 1, n)
             elif i2 is not None and tokens[i2].type == Db2Lexer.USING:
-                predicate, i = _capture_using_columns_text(tokens, i2 + 1, n)
-            connectors.append((join_type, predicate))
+                predicate, qualifiers, i = _capture_using_columns_text(tokens, i2 + 1, n)
+            connectors.append((join_type, predicate, qualifiers))
             continue
         break
     # Every `break` above can fire with `i` already None (ran out of
@@ -462,25 +415,22 @@ def _scan_table_list(tokens, from_index, cte_names, by_start=None):
     return entries, connectors, i
 
 
-def _resolve_pair_from_predicate(predicate_text, alias_map):
-    """Best-effort: if predicate_text (a connector's own captured ON/USING
-    text) unambiguously names exactly two distinct known aliases (e.g.
-    `a.x = b.y`), returns their real TableRefs in first-appearance order
-    -- correct regardless of this connector's own position in the
-    FROM-clause list, unlike the positional entries[k]/entries[k+1]
-    fallback below (confirmed wrong for a "hub table" pattern: `FROM a
-    JOIN b ON a.x=b.x JOIN c ON a.y=c.y` -- the second JOIN really
-    connects to `a`, not `b`, but position alone can't know that).
-    Returns None (caller falls back to positional) when the predicate
-    doesn't resolve to exactly two distinct known aliases: a comma-join
-    with no predicate at all, a USING clause's bare unqualified column
-    list, or an ON-clause naming more than two tables (rare, ambiguous --
-    safer to fall back than to guess)."""
-    if not predicate_text:
-        return None
+def _resolve_pair(qualifiers, alias_map):
+    """Best-effort: if a connector's own ON/USING qualifiers resolve to
+    exactly two distinct known aliases (e.g. `a.x = b.y`), returns their
+    real TableRefs in first-appearance order -- correct regardless of this
+    connector's own position in the FROM-clause list, unlike the
+    positional entries[k]/entries[k+1] fallback (which mis-pairs a "hub
+    table" pattern: `FROM a JOIN b ON a.x=b.x JOIN c ON a.y=c.y` -- the
+    second JOIN really connects to `a`, not `b`, its immediate FROM-list
+    predecessor). Returns None (caller falls back to positional) when the
+    qualifiers don't resolve to exactly two distinct known aliases: a
+    comma-join with no predicate at all, a USING clause's bare unqualified
+    column list, or an ON-clause naming more than two tables (rare,
+    ambiguous -- safer to fall back than to guess)."""
     seen = []
-    for m in _QUALIFIER_RE.finditer(predicate_text):
-        ref = alias_map.get(m.group(1).upper())
+    for qualifier in qualifiers:
+        ref = alias_map.get(qualifier)
         if ref is not None and ref not in seen:
             seen.append(ref)
     if len(seen) == 2:
@@ -493,8 +443,8 @@ def _apply_table_list(qb, entries, connectors):
         if e is not None:
             qb.add_table(e)
     for k in range(len(connectors)):
-        join_type, predicate = connectors[k]
-        pair = _resolve_pair_from_predicate(predicate, qb.alias_map)
+        join_type, predicate, qualifiers = connectors[k]
+        pair = _resolve_pair(qualifiers, qb.alias_map)
         left, right = pair if pair is not None else (entries[k], entries[k + 1])
         if left is not None and right is not None:
             qb.join_connectors.append((left, right, join_type, predicate))
@@ -653,19 +603,18 @@ def resolve_qualifier(query_blocks, char_offset, qualifier, include_cte=False):
     Finds the innermost (smallest enclosing [start_char, stop_char)) block
     containing char_offset and resolves qualifier against its alias_map.
 
-    `include_cte`: False (default, matches every existing caller's
-    behavior unchanged -- relations.py, reference_visitor.py) treats a
-    CTE alias the same as unresolvable (PLACEHOLDER_SCHEMA/TABLE), since
-    a CTE is not a real schema object; those callers' own outputs
-    (refs_columns.tsv, refs_relations.tsv's WHERE-IMPLICIT sourcing)
-    continue to only ever report real tables. query_identity.py passes
-    True: for its structural-signature purposes, an outer query's join to
-    a CTE result *is* meaningful topology (see table_scan.py's module
-    docstring) -- resolves to (PLACEHOLDER_SCHEMA, cte_name) instead.
+    `include_cte`: False (the default -- relations.py,
+    reference_visitor.py) treats a CTE alias the same as unresolvable
+    (PLACEHOLDER_SCHEMA/TABLE), since a CTE is not a real schema object;
+    those callers' outputs (refs_columns.tsv, refs_relations.tsv's
+    WHERE-IMPLICIT sourcing) only ever report real tables.
+    query_identity.py passes True: for its structural-signature purposes,
+    an outer query's join to a CTE result *is* meaningful topology (see
+    this module's docstring) -- a CTE alias resolves to
+    (PLACEHOLDER_SCHEMA, cte_name) instead.
     Uses character offsets, not token indices -- token indices get
-    reassigned per-CommonTokenStream/ListTokenSource, but Token.start/.stop
-    character offsets never change once the lexer sets them (verified in
-    vendor/antlr4-python3-runtime/antlr4/Token.py), so they're the only
+    reassigned per-CommonTokenStream/ListTokenSource, while Token.start/
+    .stop character offsets are fixed at lex time, so they're the only
     safe cross-stream key for matching a tree-walk finding back to this
     token-scan-computed scope. `char_offset` itself is guarded against
     None too -- a heavily error-recovered tree (e.g. from a file with a
@@ -695,21 +644,3 @@ def iter_table_refs(query_blocks):
     """Flattens every QueryBlock's tables for --extract-metadata's
     schema.table extraction."""
     return [ref for qb in query_blocks for ref in qb.tables]
-
-
-def extract_table_refs_only(text):
-    """Cheap, tree-free convenience wrapper for anywhere that wants table
-    refs without paying for a full tiered parse: lexes once, chunks, and
-    runs scan_query_blocks/iter_table_refs per chunk. Never invokes
-    sql_statement()/search_condition() -- table-reference extraction
-    never needed a real parse. Returns a flat list of (schema, table,
-    line) tuples."""
-    from src.detect.statement_driver import lex_file, chunk_ranges
-
-    all_tokens, _lexer_errors = lex_file(text)
-    out = []
-    for start, end in chunk_ranges(all_tokens):
-        blocks = scan_query_blocks(all_tokens[start:end])
-        for ref in iter_table_refs(blocks):
-            out.append((ref.schema, ref.table, ref.line))
-    return out

@@ -11,14 +11,9 @@ file, line):
    calls like NOW().
 2. `predicate` -- comparison operators (=, <>, <, >, <=, >=) and the
    common keyword predicates (IN/NOT IN, BETWEEN/NOT BETWEEN, LIKE/NOT
-   LIKE, IS [NOT] NULL). `predicate` is a single grammar rule with many
-   alternatives sharing one flat generated context class (no per-
-   alternative subclasses), so `classify_predicate` inspects which
-   optional accessor is actually populated to tell them apart -- see it
-   for the disambiguation details (e.g. `IN()`/`NOT()` are shared with
-   the rare `... IN NOT? DISTINCT FROM ...` and cursor `IN NOT? (FOUND |
-   OPEN)` alternatives, so those are explicitly excluded rather than
-   misclassified as an ordinary IN).
+   LIKE, IS [NOT] NULL), classified via src.predicates.classify_predicate
+   (see that module for how the grammar's flat PredicateContext is
+   disambiguated).
 
 All source text (argument lists, operands) is sliced straight from the
 original file text by character offset, not reconstructed via ANTLR's
@@ -28,18 +23,17 @@ subquery, or SUBSTR(UPPER(col1), 1, 3)) each get their own row, since
 visitChildren keeps walking into every subtree.
 
 Known limitations, all consequences of the vendored grammar rather than
-this visitor (a zero-argument call like `NOW()` used to be one too --
-**fixed** in issue #4 / commit 7fea4c8, which made `arg_list` optional):
+this visitor:
 
 1. COUNT, MAX, and LOWER are reserved keywords in vendor/grammars-v4's
    Db2Parser.g4 -- distinct lexer tokens, not the plain `ID` that
    `function_name : id_` requires -- and have no other expression/function
-   rule anywhere in the grammar (confirmed empirically: `SELECT
-   COUNT(col1) FROM t1;` fails to parse via function_invocation at all,
-   a "no viable alternative at input 'SELECT COUNT'" syntax error, which
-   pushes that whole statement chunk into the tiered driver's coarser
-   resync tiers). Every other function name tested (SUBSTR, UPPER,
-   COALESCE, SUM, AVG, MIN, ...) lexes as plain ID and parses normally.
+   rule anywhere in the grammar: `SELECT COUNT(col1) FROM t1;` fails to
+   parse via function_invocation at all (a "no viable alternative at
+   input 'SELECT COUNT'" syntax error, which pushes that whole statement
+   chunk into the tiered driver's coarser resync tiers). Other common
+   function names (SUBSTR, UPPER, COALESCE, SUM, AVG, MIN, ...) lex as
+   plain ID and parse normally.
 2. A schema-qualified call (`myschema.myfunc(x)`) has the same gap as
    schema-qualified table names elsewhere in this tool (see
    table_scan.py's module docstring) -- `function_name` is always a
@@ -57,40 +51,16 @@ this visitor (a zero-argument call like `NOW()` used to be one too --
 from Db2Parser import Db2Parser
 from Db2ParserVisitor import Db2ParserVisitor
 
-_COMPARISON_OPS = frozenset(("=", "<>", "<", ">", "<=", ">="))
+from src.predicates import COMPARISON_OPS, classify_predicate
 
 
 def _slice(text, ctx):
     return text[ctx.start.start:ctx.stop.stop + 1]
 
 
-def classify_predicate(ctx):
-    """Returns an operator name string for the predicate alternatives this
-    visitor supports, or None for anything else (see module docstring's
-    Known Limitation 4). Public: also reused by query_identity.py's
-    _PredicateFactVisitor for the same shape-classification, kept here
-    rather than duplicated since it only inspects `ctx`, no dependency on
-    this module's own text-slicing convention."""
-    exprs = ctx.expression()
-    op_ctx = ctx.comparison_operator()
-    if op_ctx is not None and len(exprs) == 2 and ctx.some_any_all() is None:
-        return op_ctx.getText()
-    if ctx.BETWEEN() is not None:
-        return "NOT BETWEEN" if ctx.NOT() is not None else "BETWEEN"
-    if ctx.LIKE() is not None:
-        return "NOT LIKE" if ctx.NOT() is not None else "LIKE"
-    if ctx.NULL_() is not None:
-        return "IS NOT NULL" if ctx.NOT() is not None else "IS NULL"
-    if (ctx.IN() is not None and ctx.DISTINCT() is None
-            and ctx.FOUND() is None and ctx.OPEN() is None
-            and ctx.cursor_variable_name() is None):
-        return "NOT IN" if ctx.NOT() is not None else "IN"
-    return None
-
-
 def _predicate_operands(text, ctx, op):
     exprs = ctx.expression()
-    if op in _COMPARISON_OPS:
+    if op in COMPARISON_OPS:
         return [_slice(text, exprs[0]), _slice(text, exprs[1])]
     if op in ("BETWEEN", "NOT BETWEEN"):
         # expression NOT? BETWEEN expression AND expression -- all three

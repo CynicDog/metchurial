@@ -20,12 +20,10 @@ from antlr4.Token import Token
 # almost certainly not real SQL. Deliberately high: legitimate SQL that
 # just happens to use bare Korean column aliases extensively (a real,
 # common pattern -- see README's Known Limitations on bare non-ASCII
-# identifiers) can land in the 5-10% range on its own without being
-# remotely "bad" -- verified empirically against a genuine, structurally
-# valid multi-CTE/JOIN query using Korean aliases throughout. Only a much
-# larger fraction reliably indicates prose/section-header text sitting
-# directly in the file body rather than tightly interleaved with normal
-# SQL tokens as an alias would be.
+# identifiers) lands in the 5-10% range on its own without being remotely
+# "bad". Only a much larger fraction reliably indicates prose/section-
+# header text sitting directly in the file body rather than tightly
+# interleaved with normal SQL tokens as an alias would be.
 LEXER_ERROR_RATIO_THRESHOLD = 0.25
 
 # A run of this many identical single-character punctuation tokens in a

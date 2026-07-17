@@ -25,6 +25,21 @@ def read_text(path):
         return f.read(), "utf-8(replace)"
 
 
+def _for_each_line(path, handle_line):
+    """Call handle_line(line) for each line of `path`, trying ENCODINGS in
+    order until one decodes the whole file cleanly. Lines decoded before a
+    mid-file decode failure have already been handled; a file no encoding
+    fits is processed as far as each attempt got."""
+    for enc in ENCODINGS:
+        try:
+            with open(path, "r", encoding=enc) as f:
+                for line in f:
+                    handle_line(line)
+            return
+        except (UnicodeDecodeError, UnicodeError):
+            continue
+
+
 def load_bad_files(path):
     """Load a persistent bad_files.txt (see cli.py's skip-list workflow):
     one file path per line, with an optional trailing '# reason' comment
@@ -36,20 +51,17 @@ def load_bad_files(path):
     entries = {}
     if not path or not os.path.isfile(path):
         return entries
-    for enc in ENCODINGS:
-        try:
-            with open(path, "r", encoding=enc) as f:
-                for line in f:
-                    if "#" in line:
-                        p, reason = line.split("#", 1)
-                        p, reason = p.strip(), reason.strip()
-                    else:
-                        p, reason = line.strip(), ""
-                    if p:
-                        entries[os.path.abspath(p)] = reason
-            return entries
-        except (UnicodeDecodeError, UnicodeError):
-            continue
+
+    def add_entry(line):
+        if "#" in line:
+            p, reason = line.split("#", 1)
+            p, reason = p.strip(), reason.strip()
+        else:
+            p, reason = line.strip(), ""
+        if p:
+            entries[os.path.abspath(p)] = reason
+
+    _for_each_line(path, add_entry)
     return entries
 
 
@@ -83,25 +95,29 @@ def ensure_stopwords_template(path):
                "See strings.txt for candidates to triage.\n")
 
 
-def load_stopwords(path):
-    """Load stopword file: one word per line, '#' comments allowed."""
+def _load_word_set(path, missing_label):
+    """Load a word-per-line file ('#' comments allowed) into a set.
+    Warns to stderr, naming the file as `missing_label`, when it's
+    missing."""
     words = set()
     if not path:
         return words
     if not os.path.isfile(path):
-        print("[WARN] stopword file not found: {}".format(path), file=sys.stderr)
+        print("[WARN] {} file not found: {}".format(missing_label, path), file=sys.stderr)
         return words
-    for enc in ENCODINGS:
-        try:
-            with open(path, "r", encoding=enc) as f:
-                for line in f:
-                    w = line.split("#", 1)[0].strip()
-                    if w:
-                        words.add(w)
-            return words
-        except (UnicodeDecodeError, UnicodeError):
-            continue
+
+    def add_word(line):
+        w = line.split("#", 1)[0].strip()
+        if w:
+            words.add(w)
+
+    _for_each_line(path, add_word)
     return words
+
+
+def load_stopwords(path):
+    """Load stopword file: one word per line, '#' comments allowed."""
+    return _load_word_set(path, "stopword")
 
 
 def ensure_known_names_template(path):
@@ -121,20 +137,4 @@ def ensure_known_names_template(path):
 
 def load_known_names(path):
     """Load known-names file: one word per line, '#' comments allowed."""
-    words = set()
-    if not path:
-        return words
-    if not os.path.isfile(path):
-        print("[WARN] known-names file not found: {}".format(path), file=sys.stderr)
-        return words
-    for enc in ENCODINGS:
-        try:
-            with open(path, "r", encoding=enc) as f:
-                for line in f:
-                    w = line.split("#", 1)[0].strip()
-                    if w:
-                        words.add(w)
-            return words
-        except (UnicodeDecodeError, UnicodeError):
-            continue
-    return words
+    return _load_word_set(path, "known-names")

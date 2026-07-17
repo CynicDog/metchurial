@@ -31,7 +31,7 @@ _LITERAL_TOKEN_TYPES = {
     Db2Lexer.DECIMAL_LITERAL,
     Db2Lexer.FLOAT_LITERAL,
     Db2Lexer.REAL_LITERAL,
-    Db2Lexer.DOUBLE_QUOTE_ID,  # deviation: DQ-literal, see module docstring
+    Db2Lexer.DOUBLE_QUOTE_ID,  # double-quoted literal: unreachable by any parser rule (see module docstring)
 }
 
 _OPERATOR_STARTER_TOKEN_TYPES = {
@@ -68,14 +68,12 @@ def _default_channel_indices(stream, start, limit):
 
 def make_token_scan_fallback(columns, sink):
     """columns: iterable of sensitive column names (any case). sink:
-    callable(column, operator, value, line), same shape as
-    ExtractorVisitor's. Returns a `(stream, pos) -> (consumed_count,
-    commit_or_None)` callable.
-
-    (sink now also receives start_offset/end_offset -- the literal
-    token's own 0-based inclusive-inclusive character span, same
-    convention as ExtractorVisitor's sink -- so callers can locate/replace
-    the exact literal span in the original source, e.g. for masking.)
+    callable(column, operator, value, line, start_offset, end_offset),
+    same shape as ExtractorVisitor's -- start_offset/end_offset are the
+    literal token's own 0-based inclusive-inclusive character span, so
+    callers can locate/replace the exact literal span in the original
+    source (e.g. for masking). Returns a `(stream, pos) ->
+    (consumed_count, commit_or_None)` callable.
 
     Splitting "how much would this consume" from "actually emit the
     finding" matters because statement_driver.py races this tier against
@@ -116,8 +114,8 @@ def make_token_scan_fallback(columns, sink):
         # anywhere) would match on proximity alone and produce a false
         # finding.
         #
-        # Also stop (untrusted, no match) at depth 0 if we hit AND/OR or a
-        # *second* operator-starter token before finding a literal --
+        # Also stop (untrusted, no match) on an AND/OR or a *second*
+        # operator-starter token at depth 0 before any literal --
         # otherwise this window can walk straight through an unrelated
         # second comparison and misattribute its literal to the current
         # column, with a garbled "operator" that's really a concatenation
