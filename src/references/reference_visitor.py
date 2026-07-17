@@ -16,6 +16,10 @@ done structurally and needs table_scan.resolve_qualifier's character-
 offset-scoped lookup instead.
 """
 
+from __future__ import annotations
+
+from typing import Any, Callable
+
 from Db2Parser import Db2Parser
 from Db2ParserVisitor import Db2ParserVisitor
 
@@ -24,7 +28,8 @@ from src.references import table_scan
 
 class ReferenceVisitor(Db2ParserVisitor):
 
-    def __init__(self, query_blocks, sink):
+    def __init__(self, query_blocks: list[table_scan.QueryBlock],
+                 sink: Callable[[str, str, str, int], None]) -> None:
         """query_blocks: list[table_scan.QueryBlock] for the chunk this
         visitor's trees belong to -- computed by
         table_scan.scan_query_blocks *before* this visitor is
@@ -37,13 +42,13 @@ class ReferenceVisitor(Db2ParserVisitor):
         self.query_blocks = query_blocks
         self.sink = sink
 
-    def visitColumn_name(self, ctx: Db2Parser.Column_nameContext):
+    def visitColumn_name(self, ctx: Db2Parser.Column_nameContext) -> Any:
         name = ctx.id_().getText().upper()
         self.sink(table_scan.PLACEHOLDER_SCHEMA, table_scan.PLACEHOLDER_TABLE,
                  name, ctx.start.line)
         return self.visitChildren(ctx)
 
-    def visitField_reference(self, ctx: Db2Parser.Field_referenceContext):
+    def visitField_reference(self, ctx: Db2Parser.Field_referenceContext) -> Any:
         qualifier = ctx.row_variable_name().getText().upper()
         column = ctx.field_name().getText().upper()
         schema, table = table_scan.resolve_qualifier(

@@ -5,6 +5,8 @@ strings.txt, stopwords.txt, known_names.txt, bad_files.txt, and the
 --extract-metadata refs_*.tsv files) into the current working directory.
 """
 
+from __future__ import annotations
+
 import argparse
 import os
 import shlex
@@ -16,7 +18,7 @@ from src.io_utils import (ensure_known_names_template, ensure_stopwords_template
                           load_known_names, load_stopwords, write_bad_files)
 from src.report import write_markdown_report, write_tsv_report, write_strings_file, write_refs_tsv
 from src.scan import DEFAULT_COLUMNS, DEFAULT_EXTENSIONS, scan_tree
-from src.detect.statement_driver import MAX_ITERATIONS_PER_CHUNK
+from src.parsing.statement_driver import MAX_ITERATIONS_PER_CHUNK
 
 # Plain 7-bit ASCII only (backslash/slash/underscore/equals/quote/hyphen/
 # space) -- deliberately no Unicode box-drawing or em-dashes here, so this
@@ -47,7 +49,7 @@ QUERY_IDENTITY_PATH = "refs_query_identity.tsv"
 QUERY_SIMILARITY_PATH = "refs_query_similarity.tsv"
 
 
-def main(argv=None):
+def main(argv: list[str] | None = None) -> None:
     if hasattr(sys.stdout, "reconfigure"):
         try:
             sys.stdout.reconfigure(encoding="utf-8")
@@ -147,8 +149,7 @@ def main(argv=None):
                       QUERY_SIMILARITY_PATH if args.extract_metadata else None) if p}
     exclude_paths |= set(previously_bad)
 
-    (hits, name_candidates, refs, relation_edges, select_block_counts, function_calls,
-     new_bad, query_identity_rows, file_count) = scan_tree(
+    tree = scan_tree(
         args.root, args.sensitive_columns, stopwords, known_names,
         extensions=args.extensions, exclude_paths=exclude_paths,
         max_iterations_per_chunk=args.max_chunk_iterations,
@@ -162,40 +163,42 @@ def main(argv=None):
     # bad_files.txt and that scanned clean this time simply doesn't appear
     # in either set, so it naturally drops off the list.
     all_bad = dict(previously_bad)
-    all_bad.update(new_bad)
+    all_bad.update(tree.bad_files)
     write_bad_files(BAD_FILES_PATH, all_bad)
 
-    relations_summary = (relations_module.aggregate_edges(relation_edges)
+    relations_summary = (relations_module.aggregate_edges(tree.relation_edges)
                          if args.extract_metadata else None)
     # Corpus-wide, single post-aggregation pass (not per-file/per-worker):
     # needs every core_id discovered across the whole scan to be
     # meaningful (see query_identity.py's module docstring).
-    query_similarity_rows = (query_identity_module.compute_similarity(query_identity_rows)
+    query_similarity_rows = (query_identity_module.compute_similarity(tree.identity_rows)
                              if args.extract_metadata else None)
 
     invocation = "metchurial " + " ".join(
         shlex.quote(a) for a in (argv if argv is not None else sys.argv[1:]))
     run_info = {
-        "invocation": invocation, "root": args.root, "file_count": file_count,
+        "invocation": invocation, "root": args.root, "file_count": tree.file_count,
         "sensitive_columns": args.sensitive_columns, "extensions": args.extensions,
         "workers": args.workers, "max_chunk_iterations": args.max_chunk_iterations,
         "extract_metadata": args.extract_metadata, "split_selects": args.split_selects,
         "mask_literals": args.mask_literals, "verbose": args.verbose,
     }
     write_markdown_report(
-        SUMMARY_PATH, run_info, hits, name_candidates, previously_bad, new_bad,
+        SUMMARY_PATH, run_info, tree.findings, tree.name_candidates, previously_bad,
+        tree.bad_files,
         len(stopwords), stopwords_freshly_created,
         len(known_names), known_names_freshly_created,
-        refs=refs if args.extract_metadata else None,
-        function_calls=function_calls if args.extract_metadata else None,
+        table_uses=tree.table_uses if args.extract_metadata else None,
+        column_uses=tree.column_uses if args.extract_metadata else None,
+        function_calls=tree.function_calls if args.extract_metadata else None,
         relations_summary=relations_summary,
-        select_block_counts=select_block_counts if args.split_selects else None,
-        query_identity_rows=query_identity_rows if args.extract_metadata else None,
+        select_block_counts=tree.select_block_counts if args.split_selects else None,
+        query_identity_rows=tree.identity_rows if args.extract_metadata else None,
         query_similarity_rows=query_similarity_rows)
 
-    all_findings = hits
+    all_findings = tree.findings
     write_tsv_report(FINDINGS_PATH, all_findings)
-    write_strings_file(STRINGS_PATH, name_candidates)
+    write_strings_file(STRINGS_PATH, tree.name_candidates)
 
     masked_written = []
     if args.mask_literals:
@@ -204,56 +207,55 @@ def main(argv=None):
             all_findings, warn=lambda msg: print(msg, file=sys.stderr))
 
     if args.extract_metadata:
-        table_rows = sorted((r for r in refs if r["kind"] == "table"),
-                            key=lambda r: (r["schema"], r["table"], r["file"], r["line"]))
-        column_rows = sorted((r for r in refs if r["kind"] == "column"),
-                             key=lambda r: (r["schema"], r["table"], r["column"], r["file"], r["line"]))
+        table_rows = sorted(tree.table_uses, key=lambda r: (r.schema, r.table, r.file, r.line))
+        column_rows = sorted(tree.column_uses,
+                             key=lambda r: (r.schema, r.table, r.column, r.file, r.line))
         write_refs_tsv(REFS_TABLES_PATH, ["schema", "table", "file", "line"], table_rows)
         write_refs_tsv(REFS_COLUMNS_PATH, ["schema", "table", "column", "file", "line"], column_rows)
 
-        function_rows = sorted(function_calls,
-                               key=lambda r: (r["function"], r["file"], r["line"]))
+        function_rows = sorted(tree.function_calls, key=lambda r: (r.function, r.file, r.line))
         write_refs_tsv(FUNCTIONS_PATH, ["function", "parameters", "file", "line"], function_rows)
 
         relations_module.write_relations_tsv(RELATIONS_PATH, relations_summary)
 
-        identity_rows = sorted(query_identity_rows, key=lambda r: (r["core_id"], r["file"], r["line"]))
+        identity_rows = sorted(tree.identity_rows, key=lambda r: (r.core_id, r.file, r.line or 0))
         write_refs_tsv(QUERY_IDENTITY_PATH,
-                      ["core_id", "file", "line", "table_count", "join_count", "predicate_count"],
+                      ["core_id", "file", "line", "table_count", "join_count", "predicate_count",
+                       "columns"],
                       identity_rows)
         query_identity_module.write_similarity_tsv(QUERY_SIMILARITY_PATH, query_similarity_rows)
 
     print("Scanned {} file(s) (.{}). Findings: {}".format(
-        file_count, ", .".join(args.extensions), len(hits)))
+        tree.file_count, ", .".join(args.extensions), len(tree.findings)))
     print("Summary        : {}".format(os.path.abspath(SUMMARY_PATH)))
     print("Findings       : {}".format(os.path.abspath(FINDINGS_PATH)))
     print("Strings        : {}".format(os.path.abspath(STRINGS_PATH)))
-    if name_candidates:
+    if tree.name_candidates:
         print("Names to review: {} unique unclassified name-like literal(s) in {} -- "
              "copy a real name into known_names.txt (flagged as a finding next run), or a "
              "non-name into stopwords.txt (won't show up again).".format(
-                 len(set(name_candidates)), os.path.abspath(STRINGS_PATH)))
+                 len(set(tree.name_candidates)), os.path.abspath(STRINGS_PATH)))
     if args.extract_metadata:
         print("Table refs     : {}".format(os.path.abspath(REFS_TABLES_PATH)))
         print("Column refs    : {}".format(os.path.abspath(REFS_COLUMNS_PATH)))
         print("Functions      : {}".format(os.path.abspath(FUNCTIONS_PATH)))
         print("Relations      : {}".format(os.path.abspath(RELATIONS_PATH)))
         print("Query identity : {} ({} statement(s), {} distinct core_id(s))".format(
-            os.path.abspath(QUERY_IDENTITY_PATH), len(query_identity_rows),
-            len({r["core_id"] for r in query_identity_rows})))
+            os.path.abspath(QUERY_IDENTITY_PATH), len(tree.identity_rows),
+            len({r.core_id for r in tree.identity_rows})))
         print("Query similarity: {}".format(os.path.abspath(QUERY_SIMILARITY_PATH)))
     if args.split_selects:
         print("Select blocks  : {} standalone SELECT block(s) across {} file(s), "
              "split files written alongside originals for files with 2+ blocks".format(
-                 sum(select_block_counts.values()),
-                 sum(1 for c in select_block_counts.values() if c > 0)))
+                 sum(tree.select_block_counts.values()),
+                 sum(1 for c in tree.select_block_counts.values() if c > 0)))
     if args.mask_literals:
         print("Masked files   : {} file(s) rewritten in place".format(
             len(masked_written)))
-    if previously_bad or new_bad:
+    if previously_bad or tree.bad_files:
         print("Bad files      : {} skipped (already in bad_files.txt), {} newly flagged "
              "this run -- see {}".format(
-                 len(previously_bad), len(new_bad), os.path.abspath(BAD_FILES_PATH)))
+                 len(previously_bad), len(tree.bad_files), os.path.abspath(BAD_FILES_PATH)))
 
     sys.exit(1 if all_findings else 0)
 

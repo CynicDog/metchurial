@@ -26,45 +26,44 @@ def refs_for(text, extract_table_refs=True, extract_column_refs=True):
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(text)
-        _hits, _suspects, refs, _rel, _sbc, _fc, _qi, _bad = scanner.scan_file(
+        result = scanner.scan_file(
             path, scanner.DEFAULT_COLUMNS, set(),
             extract_table_refs=extract_table_refs, extract_column_refs=extract_column_refs)
-        return refs
+        return result
     finally:
         os.unlink(path)
 
 
 class TestTableRefs(unittest.TestCase):
     def test_schema_qualified_table_with_alias(self):
-        refs = refs_for("SELECT * FROM schema1.table1 a WHERE a.x = 1;")
-        table_refs = [r for r in refs if r["kind"] == "table"]
+        table_refs = refs_for("SELECT * FROM schema1.table1 a WHERE a.x = 1;").table_uses
         self.assertEqual(len(table_refs), 1)
-        self.assertEqual(table_refs[0]["schema"], "SCHEMA1")
-        self.assertEqual(table_refs[0]["table"], "TABLE1")
+        self.assertEqual(table_refs[0].schema, "SCHEMA1")
+        self.assertEqual(table_refs[0].table, "TABLE1")
 
     def test_join_second_table_included_despite_broken_grammar(self):
-        refs = refs_for("SELECT * FROM t1 a JOIN t2 b ON a.x=b.y;")
-        tables = {r["table"] for r in refs if r["kind"] == "table"}
+        tables = {r.table for r in refs_for("SELECT * FROM t1 a JOIN t2 b ON a.x=b.y;").table_uses}
         self.assertEqual(tables, {"T1", "T2"})
 
     def test_disabled_by_default(self):
-        refs = refs_for("SELECT * FROM t1;", extract_table_refs=False, extract_column_refs=False)
-        self.assertEqual(refs, [])
+        result = refs_for("SELECT * FROM t1;", extract_table_refs=False, extract_column_refs=False)
+        self.assertEqual(result.table_uses, [])
+        self.assertEqual(result.column_uses, [])
 
 
 class TestColumnRefs(unittest.TestCase):
     def test_qualified_column_resolves_to_its_table(self):
         refs = refs_for("SELECT a.ACCT_ID FROM schema1.table1 a;")
-        col_refs = [r for r in refs if r["kind"] == "column" and r["column"] == "ACCT_ID"]
+        col_refs = [r for r in refs.column_uses if r.column == "ACCT_ID"]
         self.assertEqual(len(col_refs), 1)
-        self.assertEqual(col_refs[0]["schema"], "SCHEMA1")
-        self.assertEqual(col_refs[0]["table"], "TABLE1")
+        self.assertEqual(col_refs[0].schema, "SCHEMA1")
+        self.assertEqual(col_refs[0].table, "TABLE1")
 
     def test_bare_column_gets_placeholder(self):
         refs = refs_for("SELECT x FROM t1;")
-        col_refs = [r for r in refs if r["kind"] == "column" and r["column"] == "X"]
+        col_refs = [r for r in refs.column_uses if r.column == "X"]
         self.assertEqual(len(col_refs), 1)
-        self.assertEqual(col_refs[0]["table"], "(no-table)")
+        self.assertEqual(col_refs[0].table, "(no-table)")
 
     def test_existing_hit_detection_still_fires_alongside_ref_extraction(self):
         # Feature 1 shouldn't change sensitive-column comparison detection's
@@ -73,12 +72,12 @@ class TestColumnRefs(unittest.TestCase):
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write("SELECT * FROM t1 a WHERE a.ACCT_ID = '0000001';")
-            hits, suspects, refs, _rel, _sbc, _fc, _qi, _bad = scanner.scan_file(
+            result = scanner.scan_file(
                 path, scanner.DEFAULT_COLUMNS, set(),
                 extract_table_refs=True, extract_column_refs=True)
-            self.assertEqual(len(hits), 1)
-            self.assertEqual(hits[0]["value"], "'0000001'")
-            self.assertTrue(any(r["kind"] == "table" and r["table"] == "T1" for r in refs))
+            self.assertEqual(len(result.findings), 1)
+            self.assertEqual(result.findings[0].value, "'0000001'")
+            self.assertTrue(any(r.table == "T1" for r in result.table_uses))
         finally:
             os.unlink(path)
 

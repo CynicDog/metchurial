@@ -11,7 +11,7 @@ file, line):
    calls like NOW().
 2. `predicate` -- comparison operators (=, <>, <, >, <=, >=) and the
    common keyword predicates (IN/NOT IN, BETWEEN/NOT BETWEEN, LIKE/NOT
-   LIKE, IS [NOT] NULL), classified via src.predicates.classify_predicate
+   LIKE, IS [NOT] NULL), classified via src.parsing.predicates.classify_predicate
    (see that module for how the grammar's flat PredicateContext is
    disambiguated).
 
@@ -25,15 +25,12 @@ visitChildren keeps walking into every subtree.
 Known limitations, all consequences of the vendored grammar rather than
 this visitor:
 
-1. COUNT, MAX, and LOWER are reserved keywords in vendor/grammars-v4's
-   Db2Parser.g4 -- distinct lexer tokens, not the plain `ID` that
-   `function_name : id_` requires -- and have no other expression/function
-   rule anywhere in the grammar: `SELECT COUNT(col1) FROM t1;` fails to
-   parse via function_invocation at all (a "no viable alternative at
-   input 'SELECT COUNT'" syntax error, which pushes that whole statement
-   chunk into the tiered driver's coarser resync tiers). Other common
-   function names (SUBSTR, UPPER, COALESCE, SUM, AVG, MIN, ...) lex as
-   plain ID and parse normally.
+1. Common built-in names that are reserved lexer tokens (COUNT, MAX,
+   LOWER, CONCAT, LENGTH, VALUE, CHAR, DATE, TIME, TIMESTAMP, DECIMAL,
+   INT, INTEGER, REPLACE) parse via `function_name`'s explicit
+   alternatives; reserved names with an expression-position grammar role
+   of their own (EXISTS, CAST, YEAR/MONTH/DAY/... labeled durations)
+   still have no function-call parse path.
 2. A schema-qualified call (`myschema.myfunc(x)`) has the same gap as
    schema-qualified table names elsewhere in this tool (see
    table_scan.py's module docstring) -- `function_name` is always a
@@ -48,17 +45,21 @@ this visitor:
    comparatively little value.
 """
 
+from __future__ import annotations
+
+from typing import Any, Callable
+
 from Db2Parser import Db2Parser
 from Db2ParserVisitor import Db2ParserVisitor
 
-from src.predicates import COMPARISON_OPS, classify_predicate
+from src.parsing.predicates import COMPARISON_OPS, classify_predicate
 
 
-def _slice(text, ctx):
+def _slice(text: str, ctx: Any) -> str:
     return text[ctx.start.start:ctx.stop.stop + 1]
 
 
-def _predicate_operands(text, ctx, op):
+def _predicate_operands(text: str, ctx: Db2Parser.PredicateContext, op: str) -> list[str]:
     exprs = ctx.expression()
     if op in COMPARISON_OPS:
         return [_slice(text, exprs[0]), _slice(text, exprs[1])]
@@ -90,11 +91,11 @@ class FunctionVisitor(Db2ParserVisitor):
     parameters_text, line) -- name is a function name for a call, or an
     operator name (e.g. "=", "IN") for a predicate."""
 
-    def __init__(self, text, sink):
+    def __init__(self, text: str, sink: Callable[[str, str, int], None]) -> None:
         self.text = text
         self.sink = sink
 
-    def visitFunction_invocation(self, ctx: Db2Parser.Function_invocationContext):
+    def visitFunction_invocation(self, ctx: Db2Parser.Function_invocationContext) -> Any:
         name = ctx.function_name().getText().upper()
         arg_list_ctx = ctx.arg_list()
         if arg_list_ctx is not None:
@@ -104,7 +105,7 @@ class FunctionVisitor(Db2ParserVisitor):
         self.sink(name, params, ctx.start.line)
         return self.visitChildren(ctx)
 
-    def visitPredicate(self, ctx: Db2Parser.PredicateContext):
+    def visitPredicate(self, ctx: Db2Parser.PredicateContext) -> Any:
         op = classify_predicate(ctx)
         if op is not None:
             params = ", ".join(_predicate_operands(self.text, ctx, op))

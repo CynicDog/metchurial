@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import src  # noqa: E402  (bootstraps generated/ onto sys.path)
 from src.detect.bad_file_check import check_file_quality  # noqa: E402
-from src.detect.statement_driver import lex_file  # noqa: E402
+from src.parsing.statement_driver import lex_file  # noqa: E402
 
 
 def _check(sql):

@@ -40,9 +40,8 @@ HARD_CASES = ["33_query_hard_case_subquery_rewrite.sql", "37_query_hard_case_uni
 def _identity_rows(filename):
     path = os.path.join(FIXTURES_DIR, filename)
     result = scanner.scan_file(path, scanner.DEFAULT_COLUMNS, set(), extract_query_identity=True)
-    bad = result[7]
-    assert bad is None, (filename, bad)
-    return result[6]
+    assert result.bad_reason is None, (filename, result.bad_reason)
+    return result.identity_rows
 
 
 def _core_id(filename):
@@ -51,12 +50,12 @@ def _core_id(filename):
     scan.py)."""
     rows = _identity_rows(filename)
     assert len(rows) == 1, (filename, rows)
-    return rows[0]["core_id"]
+    return rows[0].core_id
 
 
 def _fact_set(filename):
     rows = _identity_rows(filename)
-    return rows[0]["fact_set"]
+    return rows[0].fact_set
 
 
 class TestCoreAClusterCollapses(unittest.TestCase):
@@ -167,7 +166,7 @@ class TestComputeSimilarityCorpusWide(unittest.TestCase):
             all_rows.extend(_identity_rows(f))
         pairs = query_identity.compute_similarity(all_rows, threshold=0.5)
         core_a_id = _core_id(CORE_A[0])
-        involving_core_a = [p for p in pairs if core_a_id in (p["core_id_a"], p["core_id_b"])]
+        involving_core_a = [p for p in pairs if core_a_id in (p.core_id_a, p.core_id_b)]
         self.assertEqual(len(involving_core_a), len(NEAR_MISS))
 
     def test_identical_core_ids_are_never_scored_against_themselves(self):

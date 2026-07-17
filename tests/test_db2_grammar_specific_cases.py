@@ -36,8 +36,8 @@ def scan_text(content, columns=None):
         f.write(content)
         path = f.name
     try:
-        hits, suspects, _refs, _rel, _sbc, _fc, _qi, _bad = scan_file(path, columns, set())
-        return hits, suspects
+        result = scan_file(path, columns, set())
+        return result.findings, result.name_candidates
     finally:
         os.unlink(path)
 
@@ -54,11 +54,11 @@ class TestBareParenQuirkEndToEnd(unittest.TestCase):
         hits, suspects = scan_text(content)
         self.assertEqual(suspects, [])
         self.assertEqual(len(hits), 1)
-        self.assertEqual(hits[0]["column_name"], "ACCT_ID")
-        self.assertEqual(hits[0]["operator"], "(")
-        self.assertEqual(hits[0]["value"], "'0000001'")
+        self.assertEqual(hits[0].column_name, "ACCT_ID")
+        self.assertEqual(hits[0].operator, "(")
+        self.assertEqual(hits[0].value, "'0000001'")
         # the span excludes the wrapping '(' -- only the quoted payload
-        start, end = hits[0]["start_offset"], hits[0]["end_offset"]
+        start, end = hits[0].start_offset, hits[0].end_offset
         self.assertEqual(content[start:end + 1], "'0000001'")
 
 
@@ -70,9 +70,9 @@ class TestDoubleQuotedLiteralEndToEnd(unittest.TestCase):
         hits, suspects = scan_text(content)
         self.assertEqual(suspects, [])
         self.assertEqual(len(hits), 1)
-        self.assertEqual(hits[0]["column_name"], "ACCT_ID")
-        self.assertEqual(hits[0]["value"], '"0000079"')
-        start, end = hits[0]["start_offset"], hits[0]["end_offset"]
+        self.assertEqual(hits[0].column_name, "ACCT_ID")
+        self.assertEqual(hits[0].value, '"0000079"')
+        start, end = hits[0].start_offset, hits[0].end_offset
         self.assertEqual(content[start:end + 1], '"0000079"')
 
 
@@ -84,13 +84,13 @@ class TestNestedParensInList(unittest.TestCase):
         content = "SELECT * FROM CUSTOMER WHERE ACCT_ID IN (('0000001'), ('0000002'));\n"
         hits, suspects = scan_text(content)
         self.assertEqual(suspects, [])
-        self.assertEqual({h["value"] for h in hits}, {"'0000001'", "'0000002'"})
-        self.assertTrue(all(h["column_name"] == "ACCT_ID" for h in hits))
+        self.assertEqual({h.value for h in hits}, {"'0000001'", "'0000002'"})
+        self.assertTrue(all(h.column_name == "ACCT_ID" for h in hits))
         # each finding's span is the innermost literal only -- the
         # wrapping parens around each IN-list item are excluded
         for h in hits:
-            start, end = h["start_offset"], h["end_offset"]
-            self.assertEqual(content[start:end + 1], h["value"])
+            start, end = h.start_offset, h.end_offset
+            self.assertEqual(content[start:end + 1], h.value)
 
 
 class TestSubqueryRedundantParens(unittest.TestCase):
@@ -103,8 +103,8 @@ class TestSubqueryRedundantParens(unittest.TestCase):
             "SELECT * FROM CUSTOMER WHERE CTRT_NO IN "
             "((SELECT CTRT_NO FROM T WHERE ACCT_ID = '02'));\n")
         self.assertEqual(suspects, [])
-        self.assertNotIn("CTRT_NO", {h["column_name"] for h in hits})
-        self.assertEqual({(h["column_name"], h["value"]) for h in hits},
+        self.assertNotIn("CTRT_NO", {h.column_name for h in hits})
+        self.assertEqual({(h.column_name, h.value) for h in hits},
                          {("ACCT_ID", "'02'")})
 
 
@@ -114,14 +114,14 @@ class TestNestedBlockComments(unittest.TestCase):
         hits, suspects = scan_text(content)
         self.assertEqual(suspects, [])
         self.assertEqual(len(hits), 1)
-        self.assertEqual(hits[0]["value"], "'0000099'")
-        self.assertEqual(hits[0]["in_comment"], "Y")
-        self.assertEqual(hits[0]["line"], 1)
+        self.assertEqual(hits[0].value, "'0000099'")
+        self.assertEqual(hits[0].in_comment, "Y")
+        self.assertEqual(hits[0].line, 1)
         # the offset-rebasing math (base_offset = tok.start + 2, composed
         # through one level of nesting) must land on the literal's exact
         # span in the *original* file's coordinate system, not the
         # re-lexed comment-inner-text one.
-        start, end = hits[0]["start_offset"], hits[0]["end_offset"]
+        start, end = hits[0].start_offset, hits[0].end_offset
         self.assertEqual(content[start:end + 1], "'0000099'")
 
     def test_hit_inside_a_triple_nested_comment_is_found(self):
@@ -129,11 +129,11 @@ class TestNestedBlockComments(unittest.TestCase):
         hits, suspects = scan_text(content)
         self.assertEqual(suspects, [])
         self.assertEqual(len(hits), 1)
-        self.assertEqual(hits[0]["value"], "'0000042'")
-        self.assertEqual(hits[0]["in_comment"], "Y")
+        self.assertEqual(hits[0].value, "'0000042'")
+        self.assertEqual(hits[0].in_comment, "Y")
         # three levels of nested-offset composition (base_offset shifted
         # once per recursion level) must still resolve correctly
-        start, end = hits[0]["start_offset"], hits[0]["end_offset"]
+        start, end = hits[0].start_offset, hits[0].end_offset
         self.assertEqual(content[start:end + 1], "'0000042'")
 
     def test_nested_comment_line_number_is_remapped_correctly(self):
@@ -141,9 +141,9 @@ class TestNestedBlockComments(unittest.TestCase):
         hits, suspects = scan_text(content)
         self.assertEqual(suspects, [])
         self.assertEqual(len(hits), 1)
-        self.assertEqual(hits[0]["value"], "'0000055'")
-        self.assertEqual(hits[0]["line"], 2)
-        start, end = hits[0]["start_offset"], hits[0]["end_offset"]
+        self.assertEqual(hits[0].value, "'0000055'")
+        self.assertEqual(hits[0].line, 2)
+        start, end = hits[0].start_offset, hits[0].end_offset
         self.assertEqual(content[start:end + 1], "'0000055'")
 
     def test_malformed_paren_fragment_inside_nested_comment_is_not_a_false_hit(self):
@@ -157,7 +157,7 @@ class TestNestedBlockComments(unittest.TestCase):
         content = "/* outer /* ctrt_no in ('0000099' */ still outer */\nSELECT 1;\n"
         hits, suspects = scan_text(content)
         self.assertEqual(suspects, [])
-        self.assertNotIn("CTRT_NO", {h["column_name"] for h in hits})
+        self.assertNotIn("CTRT_NO", {h.column_name for h in hits})
 
 
 class TestFetchFirst(unittest.TestCase):
@@ -166,7 +166,7 @@ class TestFetchFirst(unittest.TestCase):
             "SELECT * FROM CUSTOMER WHERE ACCT_ID = '0000001' FETCH FIRST 10 ROWS ONLY;\n")
         self.assertEqual(suspects, [])
         self.assertEqual(len(hits), 1)
-        self.assertEqual(hits[0]["value"], "'0000001'")
+        self.assertEqual(hits[0].value, "'0000001'")
 
 
 class TestFunctionCallArgumentNotMisattributedEndToEnd(unittest.TestCase):
@@ -197,8 +197,8 @@ class TestFunctionCallArgumentNotMisattributedEndToEnd(unittest.TestCase):
             "WHERE 1=1;\n",
             columns=["RRNO"])
         self.assertEqual(suspects, [])
-        self.assertNotIn("RRNO", {h["column_name"] for h in hits})
-        self.assertFalse(any(h["value"] == "'%'" for h in hits))
+        self.assertNotIn("RRNO", {h.column_name for h in hits})
+        self.assertFalse(any(h.value == "'%'" for h in hits))
 
 
 if __name__ == "__main__":

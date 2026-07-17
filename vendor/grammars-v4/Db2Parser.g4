@@ -4854,12 +4854,11 @@ grant_total
     ;
 
 having_clause
-    : search_condition
+    : HAVING search_condition
     ;
 
 order_by_clause
-    : order_by_clause_opts (',' order_by_clause_opts)*
-    | INPUT SEQUENCE
+    : ORDER BY (order_by_clause_opts (',' order_by_clause_opts)* | INPUT SEQUENCE)
     ;
 
 order_by_clause_opts
@@ -5497,7 +5496,13 @@ for_loop_name
     ;
 
 function_name
+    // Common DB2 built-in function names that are reserved lexer tokens
+    // rather than plain ID. Only names with no expression-position role
+    // elsewhere in the grammar are listed (EXISTS/CAST have their own
+    // constructs; YEAR/MONTH/DAY/... are labeled-duration postfixes).
     : id_
+    | COUNT | MAX | LOWER | CONCAT | LENGTH | VALUE | CHAR
+    | DATE | TIME | TIMESTAMP | DECIMAL | INT | INTEGER | REPLACE
     ;
 
 function_mapping_name

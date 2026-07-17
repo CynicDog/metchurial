@@ -20,23 +20,32 @@ dropped; everything else is returned as `name_candidates`, the
 still-unclassified pool that feeds strings.txt.
 """
 
+from __future__ import annotations
+
 import bisect
 import os
 import re
 import sys
+from typing import Any, Iterator
 
 from antlr4.Token import Token
 
-from src.references import query_identity, relations, table_scan
-from src.split import select_blocks
 from src.detect.bad_file_check import check_file_quality
 from src.detect.comment_rescan import comment_tokens, rescan_comments
 from src.detect.extractor_visitor import ExtractorVisitor
+from src.detect.supplementary_checks import make_token_scan_fallback
 from src.io_utils import read_text
+from src.models.findings import Finding
+from src.models.references import ColumnUse, FunctionCall, TableUse
+from src.models.relations import RelationEdge
+from src.models.results import FileScanResult, TreeScanResult
+from src.models.tables import QueryBlock
+from src.parsing.statement_driver import (MAX_ITERATIONS_PER_CHUNK, chunk_ranges, lex_file,
+                                          parse_file)
+from src.references import query_identity, relations, table_scan
 from src.references.function_visitor import FunctionVisitor
 from src.references.reference_visitor import ReferenceVisitor
-from src.detect.statement_driver import MAX_ITERATIONS_PER_CHUNK, chunk_ranges, lex_file, parse_file
-from src.detect.supplementary_checks import make_token_scan_fallback
+from src.split import select_blocks
 
 # Default sensitive column names (case-insensitive). Override with
 # --sensitive-columns.
@@ -59,7 +68,7 @@ SNIPPET_MAX_LEN = 160
 NAME_LITERAL_RE = re.compile(r"""['"]([가-힣]{2,4})['"]""")
 
 
-def _is_blank_literal(value):
+def _is_blank_literal(value: str) -> bool:
     """True for an empty/whitespace-only quoted literal ('', "", '   '),
     which is a placeholder/default value rather than a real hardcoded
     sensitive value and shouldn't be reported."""
@@ -68,7 +77,7 @@ def _is_blank_literal(value):
     return False
 
 
-def _line_offsets(text):
+def _line_offsets(text: str) -> list[int]:
     """Return the 0-based character offset where each line starts, used to
     map a known-name-matching regex match's character position back to a
     line number."""
@@ -80,11 +89,11 @@ def _line_offsets(text):
     return offsets
 
 
-def _line_of(offsets, pos):
+def _line_of(offsets: list[int], pos: int) -> int:
     return bisect.bisect_right(offsets, pos)
 
 
-def _snippet_of(lines, line_no):
+def _snippet_of(lines: list[str], line_no: int) -> str:
     if 1 <= line_no <= len(lines):
         text = lines[line_no - 1].strip()
     else:
@@ -94,12 +103,14 @@ def _snippet_of(lines, line_no):
     return text
 
 
-def scan_file(path, columns, stopwords, known_names=None,
-              max_iterations_per_chunk=MAX_ITERATIONS_PER_CHUNK,
-              extract_table_refs=False, extract_column_refs=False, extract_relations=False,
-              split_select=False, extract_functions=False, extract_query_identity=False):
-    """Scan one file. Returns (hits, name_candidates, refs, relation_edges,
-    select_block_count, function_calls, query_identity_rows, bad_reason).
+def scan_file(path: str, columns: list[str], stopwords: set[str],
+              known_names: set[str] | None = None,
+              max_iterations_per_chunk: int = MAX_ITERATIONS_PER_CHUNK,
+              extract_table_refs: bool = False, extract_column_refs: bool = False,
+              extract_relations: bool = False, split_select: bool = False,
+              extract_functions: bool = False,
+              extract_query_identity: bool = False) -> FileScanResult:
+    """Scan one file. Returns a FileScanResult (src/models/results.py).
 
     `known_names`/`stopwords` (sets of literal text) drive known-name
     matching: a name-shaped literal in `known_names` becomes a finding;
@@ -110,50 +121,22 @@ def scan_file(path, columns, stopwords, known_names=None,
     resync loop (statement_driver.py); exposed here so cli.py's
     --max-chunk-iterations can reach it.
 
-    `extract_table_refs`/`extract_column_refs` (off by default) populate
-    `refs`, a flat list of {"kind": "table"|"column", "schema", "table",
-    "column" (kind="column" only), "file", "line"} dicts, one per
-    syntactic occurrence (not deduplicated here -- see
-    report.write_refs_tsv).
-
-    `extract_relations` populates `relation_edges`, a flat list of raw
-    JOIN-edge dicts (see relations.py) from both structural and
-    WHERE-implicit sources.
-
-    `split_select` populates `select_block_count`, the number of
-    standalone SELECT-block chunks in this file (see select_blocks.py),
-    and writes -NN split files alongside `path` as a side effect.
-
-    `extract_functions` populates `function_calls`, a flat list of
-    {"function", "parameters", "file", "line"} dicts, one per call/
-    operator site -- "function" holds either a function name (SUBSTR,
-    UPPER, ...) or an operator name (=, IN, BETWEEN, LIKE, IS NULL, ...),
-    "parameters" the operands' raw source text (see function_visitor.py
-    for known gaps: COUNT/MAX/LOWER, schema-qualified calls, some
-    predicate forms).
-
-    `extract_query_identity` populates `query_identity_rows`, one dict per
-    statement (see query_identity.py): {"core_id", "file", "line",
-    "table_count", "join_count", "predicate_count", "fact_set"} --
-    "fact_set" is carried along for cli.py's corpus-wide
-    query_identity.compute_similarity() pass, not written to
-    refs_query_identity.tsv directly (report.write_refs_tsv only writes
-    the keys named in its own headers list).
+    The extract_*/split_select flags (all off by default) populate the
+    matching FileScanResult fields; `split_select` also writes -NN split
+    files alongside `path` as a side effect.
 
     `bad_reason` is None on a normal scan; otherwise a short
-    human-readable string, with every other return value empty/zero.
-    Set for an unreadable file (OSError), a cheap up-front quality check
+    human-readable string, with every other field empty/zero. Set for an
+    unreadable file (OSError), a cheap up-front quality check
     (bad_file_check.py) that skipped the expensive parse entirely, or an
     unexpected exception caught here so one bad file can't take down a
     whole tree scan. Not printed per-file to stderr -- recorded in
     bad_files.txt, with cli.py printing one aggregate count at the end."""
     known_names = known_names or set()
-    hits, name_candidates, refs, relation_edges, function_calls = [], [], [], [], []
     try:
         text, enc = read_text(path)
     except OSError as e:
-        reason = "cannot read: {}: {}".format(type(e).__name__, e)
-        return hits, name_candidates, refs, relation_edges, 0, function_calls, [], reason
+        return FileScanResult(bad_reason="cannot read: {}: {}".format(type(e).__name__, e))
 
     # Cheap lex-only quality gate: catches the common case (heavy non-SQL
     # noise) before spending any time in the expensive tiered driver. The
@@ -162,7 +145,7 @@ def scan_file(path, columns, stopwords, known_names=None,
     lexed = lex_file(text)
     bad_reason = check_file_quality(*lexed)
     if bad_reason is not None:
-        return hits, name_candidates, refs, relation_edges, 0, function_calls, [], bad_reason
+        return FileScanResult(bad_reason=bad_reason)
 
     try:
         return _scan_file_body(path, text, enc, columns, stopwords, known_names,
@@ -170,43 +153,48 @@ def scan_file(path, columns, stopwords, known_names=None,
                                extract_relations, split_select, extract_functions,
                                extract_query_identity, lexed)
     except Exception as e:
-        reason = "crashed while scanning: {}: {}".format(type(e).__name__, e)
-        return [], [], [], [], 0, [], [], reason
+        return FileScanResult(
+            bad_reason="crashed while scanning: {}: {}".format(type(e).__name__, e))
 
 
-def _scan_file_body(path, text, enc, columns, stopwords, known_names, max_iterations_per_chunk,
-                    extract_table_refs, extract_column_refs, extract_relations, split_select,
-                    extract_functions=False, extract_query_identity=False, lexed=None):
+def _scan_file_body(path: str, text: str, enc: str, columns: list[str], stopwords: set[str],
+                    known_names: set[str], max_iterations_per_chunk: int,
+                    extract_table_refs: bool, extract_column_refs: bool,
+                    extract_relations: bool, split_select: bool,
+                    extract_functions: bool = False, extract_query_identity: bool = False,
+                    lexed: tuple[list[Token], list[tuple[int, int, str]]] | None = None,
+                    ) -> FileScanResult:
     """Runs the actual scan; split out from scan_file() so its try/except
     wraps one simple call. Everything below assumes well-formed input --
     it isn't itself defensive."""
-    hits, name_candidates, refs, relation_edges, function_calls = [], [], [], [], []
+    result = FileScanResult()
     # One (query_blocks, predicate_visitor, line) tuple per chunk, appended
-    # inside pre_chunk_hook -- can only be turned into final core_id rows
+    # inside pre_chunk_hook -- can only be turned into final IdentityRows
     # *after* parse_file() returns for the whole file, since a chunk's
     # predicate_visitor keeps accumulating across however many times the
     # tiered driver calls .visit() on that chunk's own committed fragments
     # (see query_identity.py's module docstring).
-    query_identity_chunks = []
+    query_identity_chunks: list[tuple[list[QueryBlock], Any, int | None]] = []
     lines = text.splitlines()
-    seen_hit_lines = set()
+    seen_hit_lines: set[int] = set()
 
-    def make_hit(column, operator, value, line, in_comment, start_offset=None, end_offset=None):
+    def make_hit(column: str, operator: str, value: str, line: int, in_comment: str,
+                 start_offset: int | None = None, end_offset: int | None = None) -> None:
         if _is_blank_literal(value):
             return
-        hits.append({
-            "severity": "FINDING",
-            "file": path,
-            "line": line,
-            "column_name": column.upper(),
-            "operator": operator.strip().upper(),
-            "value": value,
-            "snippet": _snippet_of(lines, line),
-            "encoding": enc,
-            "in_comment": in_comment,
-            "start_offset": start_offset,
-            "end_offset": end_offset,
-        })
+        result.findings.append(Finding(
+            severity="FINDING",
+            file=path,
+            line=line,
+            column_name=column.upper(),
+            operator=operator.strip().upper(),
+            value=value,
+            snippet=_snippet_of(lines, line),
+            encoding=enc,
+            in_comment=in_comment,
+            start_offset=start_offset,
+            end_offset=end_offset,
+        ))
         seen_hit_lines.add(line)
 
     visitor = ExtractorVisitor(
@@ -218,12 +206,12 @@ def _scan_file_body(path, text, enc, columns, stopwords, known_names, max_iterat
 
     need_blocks = extract_table_refs or extract_column_refs or extract_relations or extract_query_identity
 
-    def pre_chunk_hook(all_tokens, start, end):
-        extra_visitors = []
+    def pre_chunk_hook(all_tokens: list[Token], start: int, end: int) -> tuple[Any, ...]:
+        extra_visitors: list[Any] = []
         if extract_functions:
-            def fn_sink(name, params, line):
-                function_calls.append({"function": name, "parameters": params,
-                                       "file": path, "line": line})
+            def fn_sink(name: str, params: str, line: int) -> None:
+                result.function_calls.append(
+                    FunctionCall(function=name, parameters=params, file=path, line=line))
             extra_visitors.append(FunctionVisitor(text, fn_sink))
         if not need_blocks:
             return tuple(extra_visitors)
@@ -234,11 +222,10 @@ def _scan_file_body(path, text, enc, columns, stopwords, known_names, max_iterat
             chunk_line = next(
                 (t.line for t in all_tokens[start:end] if t.channel == Token.DEFAULT_CHANNEL), None)
             query_identity_chunks.append((blocks, predicate_visitor, chunk_line))
-        if extract_table_refs or extract_relations:
+        if extract_table_refs:
             for tref in table_scan.iter_table_refs(blocks):
-                if extract_table_refs:
-                    refs.append({"kind": "table", "schema": tref.schema, "table": tref.table,
-                                "file": path, "line": tref.line})
+                result.table_uses.append(
+                    TableUse(schema=tref.schema, table=tref.table, file=path, line=tref.line))
         if extract_relations:
             # Structural edges cover every join type except COMMA (which
             # carries no predicate); comma-joins get their predicate
@@ -246,14 +233,14 @@ def _scan_file_body(path, text, enc, columns, stopwords, known_names, max_iterat
             # excluding them here avoids double-counting. A comma-joined
             # pair with no WHERE condition linking it goes unrecorded --
             # a known limitation, not a bug. A CTE-participating edge
-            # (either side is_cte) is also excluded here -- table_scan.py
-            # now preserves those (needed for query_identity.py's join-type
-            # signal), but refs_relations.tsv's own shipped output
-            # deliberately continues to only ever show real table-to-table
-            # pairs, unchanged from before that fix.
+            # (either side is_cte) is also excluded: refs_relations.tsv
+            # deliberately only ever shows real table-to-table pairs, while
+            # table_scan.py preserves CTE edges for query_identity.py's
+            # join-type signal.
             structural_edges = [e for e in table_scan.scan_join_edges(blocks)
                                if e.join_type != "COMMA" and not e.left.is_cte and not e.right.is_cte]
-            relation_edges.extend(relations.structural_edges_to_dicts(path, structural_edges))
+            result.relation_edges.extend(
+                relations.structural_edges_to_models(path, structural_edges))
             # An explicit `JOIN ... ON`'s own ON-clause is also visited by
             # the WHERE-implicit visitor below (it's independently
             # re-surfaced as an orphaned search_condition tree -- see
@@ -267,21 +254,22 @@ def _scan_file_body(path, text, enc, columns, stopwords, known_names, max_iterat
                 for e in structural_edges
             }
 
-            def join_sink(lschema, ltable, rschema, rtable, join_type, predicate, line):
+            def join_sink(lschema: str, ltable: str, rschema: str, rtable: str,
+                          join_type: str, predicate: str, line: int) -> None:
                 pair = tuple(sorted(((lschema, ltable), (rschema, rtable))))
                 if pair in structural_pairs:
                     return
-                relation_edges.append({
-                    "file": path, "line": line,
-                    "table_a_schema": lschema, "table_a": ltable,
-                    "table_b_schema": rschema, "table_b": rtable,
-                    "join_type": join_type, "predicate": predicate,
-                })
+                result.relation_edges.append(RelationEdge(
+                    file=path, line=line,
+                    table_a_schema=lschema, table_a=ltable,
+                    table_b_schema=rschema, table_b=rtable,
+                    join_type=join_type, predicate=predicate,
+                ))
             extra_visitors.append(relations.make_join_predicate_visitor(blocks, join_sink))
         if extract_column_refs:
-            def col_sink(schema, table, column, line):
-                refs.append({"kind": "column", "schema": schema, "table": table,
-                            "column": column, "file": path, "line": line})
+            def col_sink(schema: str, table: str, column: str, line: int) -> None:
+                result.column_uses.append(
+                    ColumnUse(schema=schema, table=table, column=column, file=path, line=line))
             extra_visitors.append(ReferenceVisitor(blocks, col_sink))
         return tuple(extra_visitors)
 
@@ -302,11 +290,10 @@ def _scan_file_body(path, text, enc, columns, stopwords, known_names, max_iterat
     # have -- every file's trailing empty chunk would otherwise share the
     # same degenerate empty-fact-set core_id, falsely "clustering" every
     # scanned file together.
-    query_identity_rows = []
     for blocks, predicate_visitor, line in query_identity_chunks:
-        row = query_identity.build_identity_row(blocks, predicate_visitor.facts, path, line)
-        if row["table_count"] or row["join_count"] or row["predicate_count"]:
-            query_identity_rows.append(row)
+        row = query_identity.build_identity_row(blocks, predicate_visitor, path, line)
+        if row.table_count or row.join_count or row.predicate_count:
+            result.identity_rows.append(row)
 
     rescan_comments(
         all_tokens, columns,
@@ -318,7 +305,7 @@ def _scan_file_body(path, text, enc, columns, stopwords, known_names, max_iterat
         (t.start, t.stop) for t in comment_tokens(all_tokens) if t.start is not None)
     comment_starts = [s for s, _ in comment_spans]
 
-    def in_comment(pos):
+    def in_comment(pos: int) -> bool:
         idx = bisect.bisect_right(comment_starts, pos) - 1
         if idx < 0:
             return False
@@ -341,22 +328,21 @@ def _scan_file_body(path, text, enc, columns, stopwords, known_names, max_iterat
             make_hit("-", "-", "'" + word + "'", ln, "Y" if in_comment(pos) else "N",
                      m.start(), m.end() - 1)
         elif word not in stopwords:
-            name_candidates.append(word)
+            result.name_candidates.append(word)
 
-    hits.sort(key=lambda f: f["line"])
+    result.findings.sort(key=lambda f: f.line)
 
-    select_block_count = 0
     if split_select:
         ranges = chunk_ranges(all_tokens)
         blocks = select_blocks.select_block_ranges(all_tokens, ranges)
-        select_block_count = len(blocks)
+        result.select_block_count = len(blocks)
         select_blocks.write_split_files(path, text, all_tokens, blocks)
 
-    return (hits, name_candidates, refs, relation_edges, select_block_count, function_calls,
-            query_identity_rows, None)
+    return result
 
 
-def _matching_files(root, suffixes, exclude_paths):
+def _matching_files(root: str, suffixes: tuple[str, ...],
+                    exclude_paths: set[str]) -> Iterator[str]:
     for dirpath, _dirnames, filenames in os.walk(root):
         for name in filenames:
             if not name.lower().endswith(suffixes):
@@ -373,15 +359,36 @@ def _matching_files(root, suffixes, exclude_paths):
             yield full
 
 
-def scan_tree(root, columns, stopwords, known_names=None,
-              extensions=DEFAULT_EXTENSIONS, exclude_paths=None,
-              max_iterations_per_chunk=MAX_ITERATIONS_PER_CHUNK,
-              verbose=False, workers=1,
-              extract_table_refs=False, extract_column_refs=False,
-              extract_relations=False, split_select=False, extract_functions=False,
-              extract_query_identity=False):
+def _merge_result(tree: TreeScanResult, path: str, result: FileScanResult,
+                  split_select: bool) -> None:
+    """Fold one file's FileScanResult into the tree-wide accumulator."""
+    tree.findings.extend(result.findings)
+    tree.name_candidates.extend(result.name_candidates)
+    tree.table_uses.extend(result.table_uses)
+    tree.column_uses.extend(result.column_uses)
+    tree.relation_edges.extend(result.relation_edges)
+    tree.function_calls.extend(result.function_calls)
+    tree.identity_rows.extend(result.identity_rows)
+    if split_select:
+        tree.select_block_counts[path] = result.select_block_count
+    if result.bad_reason is not None:
+        tree.bad_files[path] = result.bad_reason
+
+
+def scan_tree(root: str, columns: list[str], stopwords: set[str],
+              known_names: set[str] | None = None,
+              extensions: list[str] = DEFAULT_EXTENSIONS,
+              exclude_paths: set[str] | None = None,
+              max_iterations_per_chunk: int = MAX_ITERATIONS_PER_CHUNK,
+              verbose: bool = False, workers: int = 1,
+              extract_table_refs: bool = False, extract_column_refs: bool = False,
+              extract_relations: bool = False, split_select: bool = False,
+              extract_functions: bool = False,
+              extract_query_identity: bool = False) -> TreeScanResult:
     """Recursively scans files under root whose extension is in
-    `extensions` (case-insensitive, without the dot).
+    `extensions` (case-insensitive, without the dot). Returns a
+    TreeScanResult (src/models/results.py) merging every file's
+    FileScanResult.
 
     `exclude_paths` is an optional set of absolute paths to skip -- keeps
     the scanner's own output files from being scanned if they happen to
@@ -394,57 +401,37 @@ def scan_tree(root, columns, stopwords, known_names=None,
     (concurrent.futures.ProcessPoolExecutor -- parsing is CPU-bound pure
     Python, so this is real parallelism, not threads). Each file is
     scanned independently with no shared state, so only the merge order
-    into `hits`/`name_candidates` depends on completion order; report
-    writers already group/sort findings by file and line regardless. This
-    holds for `query_identity_rows` too -- each row's own `core_id` is a
-    pure hash of that one statement's own facts, so it comes back correct
-    from any worker in any order; only query_identity.compute_similarity's
-    corpus-wide pass (see cli.py) needs every row gathered back here
-    first, so it deliberately isn't run per-worker.
+    depends on completion order; report writers already group/sort
+    findings by file and line regardless. This holds for identity rows
+    too -- each row's own `core_id` is a pure hash of that one
+    statement's own facts, so it comes back correct from any worker in
+    any order; only query_identity.compute_similarity's corpus-wide pass
+    (see cli.py) needs every row gathered back here first, so it
+    deliberately isn't run per-worker.
 
-    `extract_table_refs`/`extract_column_refs`/`extract_relations`/
-    `split_select`/`extract_functions`/`extract_query_identity` are
-    threaded straight through to scan_file() (see there for the shape of
-    each corresponding return value).
-
-    Returns (hits, name_candidates, refs, relation_edges,
-    select_block_counts, function_calls, bad_files, query_identity_rows,
-    file_count) -- select_block_counts is a {file: count} dict, bad_files
-    is a {file: reason} dict."""
+    The extract_*/split_select flags are threaded straight through to
+    scan_file()."""
     suffixes = tuple("." + ext.lower().lstrip(".") for ext in extensions)
     exclude_paths = exclude_paths or set()
-    hits, name_candidates, refs, relation_edges, function_calls = [], [], [], [], []
-    query_identity_rows = []
-    select_block_counts = {}
-    bad_files = {}
+    tree = TreeScanResult()
 
     files = list(_matching_files(root, suffixes, exclude_paths))
-    total = len(files)
+    tree.file_count = len(files)
 
     if workers <= 1:
         for i, full in enumerate(files, 1):
-            h, nc, r, rel, sbc, fc, qi, bad = scan_file(full, columns, stopwords, known_names,
-                                                     max_iterations_per_chunk=max_iterations_per_chunk,
-                                                     extract_table_refs=extract_table_refs,
-                                                     extract_column_refs=extract_column_refs,
-                                                     extract_relations=extract_relations,
-                                                     split_select=split_select,
-                                                     extract_functions=extract_functions,
-                                                     extract_query_identity=extract_query_identity)
-            hits.extend(h)
-            name_candidates.extend(nc)
-            refs.extend(r)
-            relation_edges.extend(rel)
-            function_calls.extend(fc)
-            query_identity_rows.extend(qi)
-            if split_select:
-                select_block_counts[full] = sbc
-            if bad is not None:
-                bad_files[full] = bad
+            result = scan_file(full, columns, stopwords, known_names,
+                               max_iterations_per_chunk=max_iterations_per_chunk,
+                               extract_table_refs=extract_table_refs,
+                               extract_column_refs=extract_column_refs,
+                               extract_relations=extract_relations,
+                               split_select=split_select,
+                               extract_functions=extract_functions,
+                               extract_query_identity=extract_query_identity)
+            _merge_result(tree, full, result, split_select)
             if verbose:
-                print("[{}/{}] Scanned: {}".format(i, total, full), file=sys.stderr)
-        return (hits, name_candidates, refs, relation_edges, select_block_counts, function_calls,
-                bad_files, query_identity_rows, total)
+                print("[{}/{}] Scanned: {}".format(i, tree.file_count, full), file=sys.stderr)
+        return tree
 
     import concurrent.futures
 
@@ -463,19 +450,8 @@ def scan_tree(root, columns, stopwords, known_names=None,
         done = 0
         for fut in concurrent.futures.as_completed(futures):
             full = futures[fut]
-            h, nc, r, rel, sbc, fc, qi, bad = fut.result()
-            hits.extend(h)
-            name_candidates.extend(nc)
-            refs.extend(r)
-            relation_edges.extend(rel)
-            function_calls.extend(fc)
-            query_identity_rows.extend(qi)
-            if split_select:
-                select_block_counts[full] = sbc
-            if bad is not None:
-                bad_files[full] = bad
+            _merge_result(tree, full, fut.result(), split_select)
             done += 1
             if verbose:
-                print("[{}/{}] Scanned: {}".format(done, total, full), file=sys.stderr)
-    return (hits, name_candidates, refs, relation_edges, select_block_counts, function_calls,
-            bad_files, query_identity_rows, total)
+                print("[{}/{}] Scanned: {}".format(done, tree.file_count, full), file=sys.stderr)
+    return tree

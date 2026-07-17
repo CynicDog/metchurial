@@ -39,15 +39,20 @@ the fallback -- position alone mis-pairs a "hub table" pattern
 not `b`, its immediate FROM-list predecessor).
 """
 
+from __future__ import annotations
+
 from antlr4.Token import Token
 
 from Db2Lexer import Db2Lexer
 
-from src.token_walk import skip_balanced_parens as _skip_balanced_parens
-from src.token_walk import skip_hidden as _skip_hidden
+from src.models.tables import (PLACEHOLDER_SCHEMA, PLACEHOLDER_TABLE, JoinEdge, QueryBlock,
+                               TableRef)
+from src.parsing.token_walk import skip_balanced_parens as _skip_balanced_parens
+from src.parsing.token_walk import skip_hidden as _skip_hidden
 
-PLACEHOLDER_SCHEMA = "(no-schema)"
-PLACEHOLDER_TABLE = "(no-table)"
+__all__ = ["PLACEHOLDER_SCHEMA", "PLACEHOLDER_TABLE", "TableRef", "QueryBlock", "JoinEdge",
+           "looks_like_name_start", "find_cte_names", "scan_query_blocks", "scan_join_edges",
+           "resolve_qualifier", "iter_table_refs"]
 
 # Tokens that can never be the next segment of a dotted schema/catalog-
 # qualified name -- everything else immediately after a '.' in a table-
@@ -64,9 +69,28 @@ _NOT_A_NAME_SEGMENT = {
     Db2Lexer.JOIN, Db2Lexer.INNER, Db2Lexer.LEFT, Db2Lexer.RIGHT, Db2Lexer.FULL, Db2Lexer.CROSS,
 }
 
+# Literal token shapes -- never a name, at any position.
+_LITERAL_TOKEN_TYPES = {
+    Db2Lexer.STRING_LITERAL, Db2Lexer.CHAR_LITERAL, Db2Lexer.DECIMAL_LITERAL,
+    Db2Lexer.FLOAT_LITERAL, Db2Lexer.REAL_LITERAL, Db2Lexer.DOUBLE_QUOTE_ID,
+}
 
-def _looks_like_name_segment(token):
+
+def _looks_like_name_segment(token: Token) -> bool:
     return token.type not in _NOT_A_NAME_SEGMENT
+
+
+def looks_like_name_start(token: Token) -> bool:
+    """True if `token` can open a table/CTE name. The position itself is
+    the structural signal (right after FROM/UPDATE/INTO/COMMA/JOIN, or
+    right after WITH / a CTE-list comma) -- the same reserved-keyword-
+    collision argument as _looks_like_name_segment: real table and CTE
+    names routinely collide with the grammar's reserved words (BASE,
+    ORDER, ...) and lex as their own token types, not plain ID, so a
+    type whitelist would silently drop them."""
+    return (token.type not in _NOT_A_NAME_SEGMENT
+            and token.type not in _LITERAL_TOKEN_TYPES
+            and token.type != Token.EOF)
 
 _JOIN_QUALIFIER_TYPES = {
     Db2Lexer.INNER: "INNER",
@@ -85,72 +109,14 @@ _JOIN_QUALIFIER_TYPES = {
 _ALIAS_TOKEN_TYPES = {Db2Lexer.ID, Db2Lexer.G, Db2Lexer.K, Db2Lexer.M, Db2Lexer.P_, Db2Lexer.S_}
 
 
-class TableRef(object):
-    def __init__(self, schema, table, alias, line, start_char, stop_char, is_cte=False):
-        self.schema = schema
-        self.table = table
-        self.alias = alias
-        self.line = line
-        self.start_char = start_char
-        self.stop_char = stop_char
-        # True for a reference to a CTE name rather than a real schema
-        # object -- still resolvable via alias_map (a later `cte_alias.col`
-        # must resolve to *something*) but excluded from `.tables`/
-        # iter_table_refs's real-table set, and from refs_relations.tsv's
-        # existing output (see scan.py's pre_chunk_hook) -- only
-        # query_identity.py's signature-building consumes CTE-participating
-        # join edges, deliberately.
-        self.is_cte = is_cte
-
-
-class QueryBlock(object):
-    """One SELECT's own scope -- [start_char, stop_char) character range,
-    its FROM/JOIN/UPDATE/INTO table references, and the alias->TableRef map
-    used to resolve a qualified column reference (`a.col1`) back to a real
-    schema.table. Scoped per query block (not globally) since a
-    correlation name is only valid within the block that declares it."""
-
-    def __init__(self, start_char):
-        self.start_char = start_char
-        self.stop_char = None
-        self.tables = []
-        self.alias_map = {}
-        # (left_ref, right_ref, join_type, predicate_text) tuples, one per
-        # comma/JOIN connector between two successfully-recognized tables
-        # in this block's own FROM-clause table list.
-        self.join_connectors = []
-
-    def add_table(self, ref):
-        # A CTE reference still needs to be resolvable via alias_map (a
-        # later `cte_alias.col` must resolve to *something*), but must
-        # never appear in `.tables` -- that's the "CTE names excluded from
-        # real tables" contract iter_table_refs/refs_tables.tsv depend on.
-        if not ref.is_cte:
-            self.tables.append(ref)
-        self.alias_map[ref.alias] = ref
-        # DB2 allows using the real table name as its own qualifier even
-        # when an explicit alias is also given -- but an explicit alias
-        # always wins the same dict key, so only fill this in if unset.
-        self.alias_map.setdefault(ref.table, ref)
-
-
-class JoinEdge(object):
-    def __init__(self, left, right, join_type, predicate_text, line):
-        self.left = left
-        self.right = right
-        self.join_type = join_type
-        self.predicate_text = predicate_text
-        self.line = line
-
-
-def _last_real_token(tokens):
+def _last_real_token(tokens: list[Token]) -> Token | None:
     for t in reversed(tokens):
         if t.type != Token.EOF:
             return t
     return None
 
 
-def find_cte_names(tokens):
+def find_cte_names(tokens: list[Token]) -> set[str]:
     """If this chunk opens with `WITH`, walks the CTE list (`table_name
     column_name_list_paren? AS '(' ... ')'`, comma-separated) tracking
     paren depth, collecting each declared CTE name (upper-cased). Returns
@@ -164,7 +130,7 @@ def find_cte_names(tokens):
         return names
     i = _skip_hidden(tokens, i + 1, n)
     while i is not None:
-        if tokens[i].type != Db2Lexer.ID:
+        if not looks_like_name_start(tokens[i]):
             break
         names.add(tokens[i].text.upper())
         i = _skip_hidden(tokens, i + 1, n)
@@ -184,7 +150,7 @@ def find_cte_names(tokens):
     return names
 
 
-def _match_join_qualifier(tokens, i):
+def _match_join_qualifier(tokens: list[Token], i: int) -> str | None:
     """tokens[i] begins a JOIN-family keyword run if it's JOIN itself, or
     one of INNER/LEFT/RIGHT/FULL/CROSS (optionally followed by OUTER, then
     JOIN). Returns the matched join_type string, or None."""
@@ -194,7 +160,7 @@ def _match_join_qualifier(tokens, i):
     return _JOIN_QUALIFIER_TYPES.get(t)
 
 
-def _skip_join_keyword_run(tokens, i, n):
+def _skip_join_keyword_run(tokens: list[Token], i: int, n: int) -> int | None:
     """tokens[i] is where _match_join_qualifier matched. Returns the index
     right after the JOIN keyword itself."""
     if tokens[i].type != Db2Lexer.JOIN:
@@ -210,7 +176,7 @@ _NO_SPACE_BEFORE = {Db2Lexer.DOT, Db2Lexer.RIGHT_RND_BKT, Db2Lexer.COMMA, Db2Lex
 _NO_SPACE_AFTER = {Db2Lexer.DOT, Db2Lexer.LEFT_RND_BKT}
 
 
-def _join_token_texts(toks):
+def _join_token_texts(toks: list[Token]) -> str:
     """Joins default-channel token texts back into readable source-like
     text (`a.col1 = b.col2`, not `a . col1 = b . col2`) -- for reporting
     only, not meant to be re-lexed verbatim."""
@@ -224,7 +190,7 @@ def _join_token_texts(toks):
     return "".join(out)
 
 
-def _qualifiers_of(parts):
+def _qualifiers_of(parts: list[Token]) -> tuple[str, ...]:
     """Upper-cased qualifier texts (the token immediately preceding each
     '.') in source order, e.g. ('A', 'B') for `a.x = b.y`. Chained dotted
     names contribute every segment before a dot (`s.t.c` -> ('S', 'T'));
@@ -234,7 +200,7 @@ def _qualifiers_of(parts):
                  if t.type == Db2Lexer.DOT and k > 0)
 
 
-def _capture_predicate_text(tokens, start_i, n):
+def _capture_predicate_text(tokens: list[Token], start_i: int, n: int) -> tuple[str, tuple[str, ...], int]:
     """Raw source text of a JOIN's ON-clause (or any search-condition-
     shaped fragment), from start_i up to (not including) the next WHERE/
     GROUP/ORDER/JOIN-family-keyword/COMMA/SEMI/EOF at the *current* paren
@@ -268,7 +234,7 @@ def _capture_predicate_text(tokens, start_i, n):
     return _join_token_texts(parts), _qualifiers_of(parts), i
 
 
-def _capture_using_columns_text(tokens, start_i, n):
+def _capture_using_columns_text(tokens: list[Token], start_i: int, n: int) -> tuple[str, tuple[str, ...], int]:
     i = _skip_hidden(tokens, start_i, n)
     if i is None or tokens[i].type != Db2Lexer.LEFT_RND_BKT:
         return "", (), (i if i is not None else n)
@@ -277,7 +243,9 @@ def _capture_using_columns_text(tokens, start_i, n):
     return _join_token_texts(parts), _qualifiers_of(parts), j
 
 
-def _scan_one_table_ref(tokens, i, cte_names, by_start=None):
+def _scan_one_table_ref(tokens: list[Token], i: int, cte_names: set[str],
+                        by_start: dict[int, QueryBlock] | None = None,
+                        ) -> tuple[TableRef | None, int]:
     """tokens[i] is the first default-channel token of one table-list
     entry. Returns (TableRef_or_None, next_index). None covers two cases:
     a parenthesized derived table/subquery, and a CTE-name reference
@@ -307,7 +275,7 @@ def _scan_one_table_ref(tokens, i, cte_names, by_start=None):
         if j is not None and tokens[j].type in _ALIAS_TOKEN_TYPES:
             j += 1
         return None, (j if j is not None else n)
-    if tok.type != Db2Lexer.ID:
+    if not looks_like_name_start(tok):
         return None, i
 
     line = tok.line
@@ -357,7 +325,9 @@ def _scan_one_table_ref(tokens, i, cte_names, by_start=None):
     return TableRef(schema, table, alias, line, start_char, stop_char, is_cte=is_cte), j
 
 
-def _scan_table_list(tokens, from_index, cte_names, by_start=None):
+def _scan_table_list(tokens: list[Token], from_index: int, cte_names: set[str],
+                     by_start: dict[int, QueryBlock] | None = None,
+                     ) -> tuple[list[TableRef | None], list[tuple[str, str, tuple[str, ...]]], int]:
     """Starting right after a FROM/UPDATE/INTO keyword, scans a comma-
     and/or JOIN-connected list of table references. Returns (entries,
     connectors, next_index): `entries` parallels the source order and may
@@ -415,7 +385,8 @@ def _scan_table_list(tokens, from_index, cte_names, by_start=None):
     return entries, connectors, i
 
 
-def _resolve_pair(qualifiers, alias_map):
+def _resolve_pair(qualifiers: tuple[str, ...],
+                  alias_map: dict[str, TableRef]) -> tuple[TableRef, TableRef] | None:
     """Best-effort: if a connector's own ON/USING qualifiers resolve to
     exactly two distinct known aliases (e.g. `a.x = b.y`), returns their
     real TableRefs in first-appearance order -- correct regardless of this
@@ -438,7 +409,8 @@ def _resolve_pair(qualifiers, alias_map):
     return None
 
 
-def _apply_table_list(qb, entries, connectors):
+def _apply_table_list(qb: QueryBlock, entries: list[TableRef | None],
+                      connectors: list[tuple[str, str, tuple[str, ...]]]) -> None:
     for e in entries:
         if e is not None:
             qb.add_table(e)
@@ -450,7 +422,7 @@ def _apply_table_list(qb, entries, connectors):
             qb.join_connectors.append((left, right, join_type, predicate))
 
 
-def _discover_blocks(tokens):
+def _discover_blocks(tokens: list[Token]) -> list[QueryBlock]:
     """Pass A: an unconditional walk over *every* token (never skips
     anything -- this is what guarantees a nested SELECT inside a derived
     table, IN(...)/EXISTS(...), or CTE body is always found, regardless of
@@ -510,7 +482,8 @@ def _discover_blocks(tokens):
     return finished
 
 
-def _populate_table_lists(tokens, by_start, cte_names, start=0, end=None):
+def _populate_table_lists(tokens: list[Token], by_start: dict[int, QueryBlock],
+                          cte_names: set[str], start: int = 0, end: int | None = None) -> None:
     """Pass B: attaches FROM/UPDATE/INTO-discovered tables to the already-
     discovered (Pass A) QueryBlock that's current at each point. Unlike
     Pass A, this pass *is* free to skip a derived table's parens (via
@@ -572,7 +545,7 @@ def _populate_table_lists(tokens, by_start, cte_names, start=0, end=None):
             i += 1
 
 
-def scan_query_blocks(tokens):
+def scan_query_blocks(tokens: list[Token]) -> list[QueryBlock]:
     """Discovers every query block in a chunk's tokens
     (all_tokens[start:end] from statement_driver.chunk_ranges()) and
     populates each with its own FROM/JOIN/UPDATE/INTO table references and
@@ -587,7 +560,7 @@ def scan_query_blocks(tokens):
     return blocks
 
 
-def scan_join_edges(query_blocks):
+def scan_join_edges(query_blocks: list[QueryBlock]) -> list[JoinEdge]:
     """Flattens every QueryBlock's own join_connectors (already built while
     scanning that block's FROM-clause table list) into JoinEdge objects."""
     edges = []
@@ -597,7 +570,8 @@ def scan_join_edges(query_blocks):
     return edges
 
 
-def resolve_qualifier(query_blocks, char_offset, qualifier, include_cte=False):
+def resolve_qualifier(query_blocks: list[QueryBlock], char_offset: int | None,
+                      qualifier: str | None, include_cte: bool = False) -> tuple[str, str]:
     """qualifier: upper-cased alias text (a field_reference's
     row_variable_name), or None for a bare, unqualified column_name.
     Finds the innermost (smallest enclosing [start_char, stop_char)) block
@@ -640,7 +614,7 @@ def resolve_qualifier(query_blocks, char_offset, qualifier, include_cte=False):
     return ref.schema, ref.table
 
 
-def iter_table_refs(query_blocks):
+def iter_table_refs(query_blocks: list[QueryBlock]) -> list[TableRef]:
     """Flattens every QueryBlock's tables for --extract-metadata's
     schema.table extraction."""
     return [ref for qb in query_blocks for ref in qb.tables]

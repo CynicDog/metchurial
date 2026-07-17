@@ -14,6 +14,8 @@ try/except around the real work is the second, for whatever this cheap
 check doesn't catch.
 """
 
+from __future__ import annotations
+
 from antlr4.Token import Token
 
 # Above this fraction of (non-EOF) tokens being lexer errors, the file is
@@ -34,7 +36,7 @@ LEXER_ERROR_RATIO_THRESHOLD = 0.25
 MIN_PUNCTUATION_RUN = 6
 
 
-def _longest_repeated_punct_run(tokens):
+def _longest_repeated_punct_run(tokens: list[Token]) -> int:
     best = 0
     current = 0
     prev_type = None
@@ -50,7 +52,8 @@ def _longest_repeated_punct_run(tokens):
     return best
 
 
-def check_file_quality(all_tokens, lexer_errors):
+def check_file_quality(all_tokens: list[Token],
+                       lexer_errors: list[tuple[int, int, str]]) -> str | None:
     """all_tokens/lexer_errors: statement_driver.lex_file()'s own return
     values -- this check is a byproduct of lexing, not a second pass.
     Returns None if the file looks like real SQL, or a short human-

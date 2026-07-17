@@ -23,11 +23,15 @@ literal's exact original-source span, quote characters included when
 quoted.
 """
 
+from __future__ import annotations
+
 import codecs
 import re
 from collections import defaultdict
+from typing import Callable, Iterable
 
 from src.io_utils import read_text
+from src.models.findings import Finding
 
 MASK_TEXT = "****"      # replaces a quoted literal's inner content
 MASK_NUMERIC = "0000"   # replaces an unquoted numeric literal wholesale
@@ -42,7 +46,7 @@ MASK_NUMERIC = "0000"   # replaces an unquoted numeric literal wholesale
 _NUMERIC_RE = re.compile(r"^(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?$")
 
 
-def _literal_replacement(span_text):
+def _literal_replacement(span_text: str) -> str | None:
     """span_text = original_text[start:end + 1] for one finding's span.
     Returns the masked replacement, or None if this span's shape isn't one
     of the two literal shapes sensitive-column comparison detection/
@@ -62,7 +66,9 @@ def _literal_replacement(span_text):
     return None
 
 
-def mask_text(original_text, spans, warn=None):
+def mask_text(original_text: str, spans: Iterable[tuple[int, int]],
+              warn: Callable[[str], None] | None = None,
+              ) -> tuple[str, dict[str, int]]:
     """Pure function. original_text: one file's full source text. spans:
     iterable of (start_offset, end_offset) 0-based inclusive-inclusive
     pairs. Returns (masked_text, stats) where stats has keys "masked",
@@ -104,7 +110,7 @@ def mask_text(original_text, spans, warn=None):
     return "".join(out), stats
 
 
-def _write_encoding_for(path, enc):
+def _write_encoding_for(path: str, enc: str) -> str:
     """io_utils.read_text tries "utf-8-sig" first, and that codec silently
     decodes a plain UTF-8 file with no BOM too (it only strips a BOM if
     one is actually present) -- so `enc` alone can't tell whether the
@@ -124,19 +130,20 @@ def _write_encoding_for(path, enc):
     return enc
 
 
-def write_masked_files(findings, warn=None):
-    """findings: hits (see cli.py). For each distinct file among them,
+def write_masked_files(findings: list[Finding],
+                       warn: Callable[[str], None] | None = None) -> list[str]:
+    """findings: the scan's Finding list (see cli.py). For each distinct file among them,
     re-reads the file (via io_utils.read_text -- the same deterministic
     encoding auto-detection used during scanning; re-detecting is safe
     since the file's bytes haven't changed since it was scanned), builds
     the masked text, and overwrites the file in place with it. A file all
     of whose findings get defensively skipped (nothing actually masked)
     is left untouched. Returns the list of paths rewritten."""
-    by_file = defaultdict(list)
+    by_file: dict[str, list[Finding]] = defaultdict(list)
     for f in findings:
-        if f.get("start_offset") is None or f.get("end_offset") is None:
+        if f.start_offset is None or f.end_offset is None:
             continue
-        by_file[f["file"]].append(f)
+        by_file[f.file].append(f)
 
     written = []
     for path, file_findings in sorted(by_file.items()):
@@ -147,7 +154,7 @@ def write_masked_files(findings, warn=None):
                 warn("mask: cannot re-read {}: {}".format(path, e))
             continue
 
-        spans = [(f["start_offset"], f["end_offset"]) for f in file_findings]
+        spans = [(f.start_offset, f.end_offset) for f in file_findings]
         masked_text, stats = mask_text(original_text, spans, warn=warn)
         if stats["masked"] == 0:
             continue

@@ -22,6 +22,11 @@ digit-boundary/quote-escaping tricks are needed -- token boundaries are
 already correct by construction, same as the structural path).
 """
 
+from __future__ import annotations
+
+from typing import Callable, Iterable
+
+from antlr4 import CommonTokenStream
 from antlr4.Token import Token
 
 from Db2Lexer import Db2Lexer
@@ -54,7 +59,7 @@ _OPERATOR_STARTER_TOKEN_TYPES = {
 _MAX_LOOKAHEAD = 8
 
 
-def _default_channel_indices(stream, start, limit):
+def _default_channel_indices(stream: CommonTokenStream, start: int, limit: int) -> list[int]:
     """Indices of up to `limit` default-channel tokens at or after
     `start`, in order."""
     out = []
@@ -66,7 +71,10 @@ def _default_channel_indices(stream, start, limit):
     return out
 
 
-def make_token_scan_fallback(columns, sink):
+def make_token_scan_fallback(
+        columns: Iterable[str],
+        sink: Callable[[str, str, str, int, int, int], None],
+) -> Callable[[CommonTokenStream, int], tuple[int, Callable[[], None] | None]]:
     """columns: iterable of sensitive column names (any case). sink:
     callable(column, operator, value, line, start_offset, end_offset),
     same shape as ExtractorVisitor's -- start_offset/end_offset are the
@@ -88,7 +96,8 @@ def make_token_scan_fallback(columns, sink):
     only invokes once it has actually chosen this tier as the winner."""
     upper_columns = {c.upper() for c in columns}
 
-    def fallback(stream, pos):
+    def fallback(stream: CommonTokenStream,
+                 pos: int) -> tuple[int, Callable[[], None] | None]:
         tok = stream.tokens[pos]
         if tok.channel != Token.DEFAULT_CHANNEL:
             return 0, None
@@ -184,8 +193,9 @@ def make_token_scan_fallback(columns, sink):
         start_offset = candidate.start
         end_offset = candidate.stop
 
-        def commit(name=name, operator=operator, value=value, line=line,
-                   start_offset=start_offset, end_offset=end_offset):
+        def commit(name: str = name, operator: str = operator, value: str = value,
+                   line: int = line, start_offset: int = start_offset,
+                   end_offset: int = end_offset) -> None:
             sink(name, operator, value, line, start_offset, end_offset)
 
         return (idx - pos) + 1, commit

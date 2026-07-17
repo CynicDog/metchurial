@@ -26,7 +26,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import src  # noqa: E402  (bootstraps generated/ onto sys.path)
 from src import scan as scanner  # noqa: E402
-from src.detect.statement_driver import chunk_ranges, lex_file  # noqa: E402
+from src.parsing.statement_driver import chunk_ranges, lex_file  # noqa: E402
 from src.split.select_blocks import select_block_ranges  # noqa: E402
 
 
@@ -41,23 +41,22 @@ class TestAnsiJoinChain(unittest.TestCase):
     path for any of these beyond the first table."""
 
     def test_hit_still_found_inside_a_join_heavy_statement(self):
-        hits, suspects, _refs, _rel, _sbc, _fc, _qi, bad = _scan("17_ansi_join_chain.sql")
-        self.assertIsNone(bad)
-        self.assertEqual(suspects, [])
+        result = _scan("17_ansi_join_chain.sql")
+        hits = result.findings
+        self.assertIsNone(result.bad_reason)
+        self.assertEqual(result.name_candidates, [])
         self.assertEqual(len(hits), 1)
-        self.assertEqual(hits[0]["column_name"], "ACCT_ID")
-        self.assertEqual(hits[0]["value"], "'1234567'")
+        self.assertEqual(hits[0].column_name, "ACCT_ID")
+        self.assertEqual(hits[0].value, "'1234567'")
 
     def test_every_joined_table_is_discovered(self):
-        _hits, _suspects, refs, _rel, _sbc, _fc, _qi, _bad = _scan(
-            "17_ansi_join_chain.sql", extract_table_refs=True)
-        tables = {r["table"] for r in refs if r["kind"] == "table"}
+        result = _scan("17_ansi_join_chain.sql", extract_table_refs=True)
+        tables = {r.table for r in result.table_uses}
         self.assertEqual(tables, {"TBACCT", "TBCTRT", "TBSTAT", "TBSAMPLE001", "TBCODE"})
 
     def test_join_edges_for_inner_outer_and_cross_all_recorded(self):
-        _hits, _suspects, _refs, rel, _sbc, _fc, _qi, _bad = _scan(
-            "17_ansi_join_chain.sql", extract_relations=True)
-        join_types = sorted(edge["join_type"] for edge in rel)
+        result = _scan("17_ansi_join_chain.sql", extract_relations=True)
+        join_types = sorted(edge.join_type for edge in result.relation_edges)
         self.assertEqual(join_types, ["CROSS", "INNER", "JOIN", "LEFT"])
 
 
@@ -69,13 +68,13 @@ class TestCteWithAnsiJoin(unittest.TestCase):
     either."""
 
     def test_hit_found_and_cte_name_excluded_from_real_tables(self):
-        hits, suspects, refs, _rel, _sbc, _fc, _qi, bad = _scan(
-            "18_cte_with_ansi_join.sql", extract_table_refs=True)
-        self.assertIsNone(bad)
-        self.assertEqual(suspects, [])
+        result = _scan("18_cte_with_ansi_join.sql", extract_table_refs=True)
+        hits = result.findings
+        self.assertIsNone(result.bad_reason)
+        self.assertEqual(result.name_candidates, [])
         self.assertEqual(len(hits), 1)
-        self.assertEqual(hits[0]["value"], "'7654321'")
-        tables = {r["table"] for r in refs if r["kind"] == "table"}
+        self.assertEqual(hits[0].value, "'7654321'")
+        tables = {r.table for r in result.table_uses}
         self.assertEqual(tables, {"TBACCT", "TBSTAT", "TBCTRT"})
         self.assertNotIn("ACTIVE_ACCT", tables)
 
@@ -94,18 +93,18 @@ class TestZeroArgumentFunctionFixture(unittest.TestCase):
     arg_list gave zero-arg calls no parse path at all."""
 
     def test_hit_found_alongside_zero_arg_calls(self):
-        hits, suspects, _refs, _rel, _sbc, _fc, _qi, bad = _scan("19_zero_argument_functions.sql")
-        self.assertIsNone(bad)
-        self.assertEqual(suspects, [])
+        result = _scan("19_zero_argument_functions.sql")
+        hits = result.findings
+        self.assertIsNone(result.bad_reason)
+        self.assertEqual(result.name_candidates, [])
         self.assertEqual(len(hits), 1)
-        self.assertEqual(hits[0]["value"], "'1112223'")
+        self.assertEqual(hits[0].value, "'1112223'")
 
     def test_both_now_calls_captured(self):
-        _hits, _suspects, _refs, _rel, _sbc, fc, _qi, _bad = _scan(
-            "19_zero_argument_functions.sql", extract_functions=True)
-        now_calls = [f for f in fc if f["function"] == "NOW"]
+        fc = _scan("19_zero_argument_functions.sql", extract_functions=True).function_calls
+        now_calls = [f for f in fc if f.function == "NOW"]
         self.assertEqual(len(now_calls), 2)
-        self.assertTrue(all(f["parameters"] == "" for f in now_calls))
+        self.assertTrue(all(f.parameters == "" for f in now_calls))
 
 
 if __name__ == "__main__":

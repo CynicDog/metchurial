@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Writes every report artifact a scan produces (summary.md, findings.tsv,
-strings.txt, refs_*.tsv) from the finding dicts (severity/file/line/
-column_name/operator/value/snippet/encoding/in_comment) scan.py produces.
+strings.txt, refs_*.tsv) from the domain models (src/models) scan.py
+produces.
 
 summary.md is an index into the other artifacts, not a duplicate of them:
 every section beyond "Sensitive Findings" is a bounded count-plus-top-N view
@@ -10,8 +10,16 @@ stopwords.txt, known_names.txt, refs_*.tsv), so its size stays
 fixed regardless of how large the scan is.
 """
 
+from __future__ import annotations
+
 import datetime
 import os
+from typing import Any, Callable, Iterable, Sequence, TextIO
+
+from src.models.findings import Finding
+from src.models.identity import IdentityRow, SimilarityPair
+from src.models.references import ColumnUse, FunctionCall, TableUse
+from src.models.relations import RelationRollup
 
 # Cap on how many literals get joined into one Markdown "Value(s)" cell
 # (e.g. a large IN(...) list) before switching to "...(+N more)" -- an
@@ -24,7 +32,7 @@ MAX_GROUPED_VALUES = 10
 DETAIL_CAP = 15
 
 
-def md_escape(text):
+def md_escape(text: object) -> str:
     """Escape/normalize text for a Markdown table cell. A literal can
     legally contain an embedded newline (a quoted string spanning physical
     lines); left as-is that breaks the table row, so whitespace is
@@ -33,7 +41,7 @@ def md_escape(text):
     return text.replace("|", "\\|").replace("`", "'")
 
 
-def _format_grouped_values(values):
+def _format_grouped_values(values: Sequence[str]) -> str:
     """Join grouped literals for one Markdown cell, capped at
     MAX_GROUPED_VALUES so a large IN(...)/repeated-comparison list (which
     the .tsv already reports one-row-per-literal, uncapped) can't blow up
@@ -45,19 +53,19 @@ def _format_grouped_values(values):
     return "; ".join(values)
 
 
-def _group_for_detail(items):
+def _group_for_detail(items: list[Finding]) -> list[dict[str, Any]]:
     """Collapse findings that share file/line/column/operator into one row
     with their values joined -- keeps an IN(...)/BETWEEN explosion (which
     the .tsv reports one-row-per-literal, by design) from also exploding
     the Markdown detail table row-for-row."""
-    groups = {}
+    groups: dict[tuple[int, str, str], dict[str, Any]] = {}
     order = []
     for f in items:
-        key = (f["line"], f["column_name"], f["operator"])
+        key = (f.line, f.column_name, f.operator)
         if key not in groups:
-            groups[key] = {"values": [], "snippet": f["snippet"]}
+            groups[key] = {"values": [], "snippet": f.snippet}
             order.append(key)
-        groups[key]["values"].append(f["value"])
+        groups[key]["values"].append(f.value)
     rows = []
     for key in order:
         line, column, operator = key
@@ -70,7 +78,7 @@ def _group_for_detail(items):
     return rows
 
 
-def _name_candidate_counts(name_candidates):
+def _name_candidate_counts(name_candidates: list[str]) -> dict[str, int]:
     """{name-shaped literal: occurrence count} across all not-yet-classified
     candidates -- shared by write_strings_file and the "## String
     Occurrences" summary section so the two never drift apart."""
@@ -80,7 +88,8 @@ def _name_candidate_counts(name_candidates):
     return counts
 
 
-def _ranked_counts(items, key):
+def _ranked_counts(items: Iterable[Any],
+                   key: Callable[[Any], str]) -> list[tuple[str, int]]:
     """{key(item): count}, sorted by count desc then key asc -- shared
     ranking helper for the Table/Column References and Functions summary
     sections."""
@@ -91,7 +100,7 @@ def _ranked_counts(items, key):
     return sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
 
 
-def _write_run_info(out, run_info):
+def _write_run_info(out: TextIO, run_info: dict[str, Any]) -> None:
     out.write("# Scan Summary\n\n")
     out.write("| Item | Value |\n|---|---|\n")
     out.write("| Run at | {} |\n".format(
@@ -111,10 +120,10 @@ def _write_run_info(out, run_info):
     out.write("| Verbose | {} |\n\n".format("ON" if run_info["verbose"] else "OFF"))
 
 
-def _write_sensitive_hits(out, hits):
-    by_file = {}
+def _write_sensitive_hits(out: TextIO, hits: list[Finding]) -> None:
+    by_file: dict[str, list[Finding]] = {}
     for f in hits:
-        by_file.setdefault(f["file"], []).append(f)
+        by_file.setdefault(f.file, []).append(f)
 
     out.write("## Sensitive Findings\n\n")
     if not by_file:
@@ -149,7 +158,7 @@ def _write_sensitive_hits(out, hits):
     out.write("\n")
 
 
-def _write_string_occurrences(out, name_candidates):
+def _write_string_occurrences(out: TextIO, name_candidates: list[str]) -> None:
     out.write("## String Occurrences\n\n")
     counts = _name_candidate_counts(name_candidates)
     if not counts:
@@ -168,7 +177,8 @@ def _write_string_occurrences(out, name_candidates):
     out.write("\n")
 
 
-def _write_bad_files(out, previously_bad, new_bad):
+def _write_bad_files(out: TextIO, previously_bad: dict[str, str],
+                     new_bad: dict[str, str]) -> None:
     out.write("## Bad Files\n\n")
     all_bad = dict(previously_bad)
     all_bad.update(new_bad)
@@ -186,7 +196,7 @@ def _write_bad_files(out, previously_bad, new_bad):
     out.write("\n")
 
 
-def _write_stopwords(out, stopwords_count, freshly_created):
+def _write_stopwords(out: TextIO, stopwords_count: int, freshly_created: bool) -> None:
     out.write("## Stopwords\n\n")
     if freshly_created:
         out.write("stopwords.txt didn't exist yet -- created an empty template this run. "
@@ -195,7 +205,8 @@ def _write_stopwords(out, stopwords_count, freshly_created):
         out.write("{} stopword(s) loaded from stopwords.txt.\n\n".format(stopwords_count))
 
 
-def _write_known_names(out, known_names_count, freshly_created):
+def _write_known_names(out: TextIO, known_names_count: int,
+                       freshly_created: bool) -> None:
     out.write("## Known Names\n\n")
     if freshly_created:
         out.write("known_names.txt didn't exist yet -- created an empty template this run. "
@@ -204,16 +215,16 @@ def _write_known_names(out, known_names_count, freshly_created):
         out.write("{} known name(s) loaded from known_names.txt.\n\n".format(known_names_count))
 
 
-def _write_references(out, refs):
+def _write_references(out: TextIO, table_uses: list[TableUse],
+                      column_uses: list[ColumnUse]) -> None:
     out.write("## Table & Column References\n\n")
-    table_refs = [r for r in refs if r["kind"] == "table"]
-    column_refs = [r for r in refs if r["kind"] == "column"]
-    if not table_refs and not column_refs:
+    if not table_uses and not column_uses:
         out.write("No table/column references detected.\n\n")
         return
     out.write("{} table reference(s), {} column reference(s). Full detail in "
-              "refs_tables.tsv / refs_columns.tsv.\n\n".format(len(table_refs), len(column_refs)))
-    ranked = _ranked_counts(refs, key=lambda r: "{}.{}".format(r["schema"], r["table"]))
+              "refs_tables.tsv / refs_columns.tsv.\n\n".format(len(table_uses), len(column_uses)))
+    ranked = _ranked_counts(list(table_uses) + list(column_uses),
+                            key=lambda r: "{}.{}".format(r.schema, r.table))
     out.write("| Table | References |\n|---|---:|\n")
     for name, count in ranked[:MAX_GROUPED_VALUES]:
         out.write("| `{}` | {} |\n".format(md_escape(name), count))
@@ -223,12 +234,12 @@ def _write_references(out, refs):
     out.write("\n")
 
 
-def _write_functions(out, function_calls):
+def _write_functions(out: TextIO, function_calls: list[FunctionCall]) -> None:
     out.write("## Functions\n\n")
     if not function_calls:
         out.write("No function calls detected.\n\n")
         return
-    ranked = _ranked_counts(function_calls, key=lambda r: r["function"])
+    ranked = _ranked_counts(function_calls, key=lambda r: r.function)
     out.write("{} function call(s) found. Full detail in refs_functions.tsv.\n\n".format(
         len(function_calls)))
     out.write("| Function | Calls |\n|---|---:|\n")
@@ -239,7 +250,7 @@ def _write_functions(out, function_calls):
     out.write("\n")
 
 
-def _write_relations(out, relations_summary):
+def _write_relations(out: TextIO, relations_summary: list[RelationRollup]) -> None:
     out.write("## Relations\n\n")
     if not relations_summary:
         out.write("No JOIN relationships detected.\n\n")
@@ -249,25 +260,26 @@ def _write_relations(out, relations_summary):
     out.write("| Table A | Table B | Join Count | Predicates |\n")
     out.write("|---|---|---:|---|\n")
     for row in relations_summary[:MAX_GROUPED_VALUES]:
-        a = "{}.{}".format(row["table_a_schema"], row["table_a"])
-        b = "{}.{}".format(row["table_b_schema"], row["table_b"])
-        preds = _format_grouped_values(row["predicates"]) if row["predicates"] else ""
+        a = "{}.{}".format(row.table_a_schema, row.table_a)
+        b = "{}.{}".format(row.table_b_schema, row.table_b)
+        preds = _format_grouped_values(row.predicates) if row.predicates else ""
         out.write("| `{}` | `{}` | {} | `{}` |\n".format(
-            md_escape(a), md_escape(b), row["join_count"], md_escape(preds)))
+            md_escape(a), md_escape(b), row.join_count, md_escape(preds)))
     if len(relations_summary) > MAX_GROUPED_VALUES:
         out.write("\n_...+{} more table-pair(s), see refs_relations.tsv._\n".format(
             len(relations_summary) - MAX_GROUPED_VALUES))
     out.write("\n")
 
 
-def _write_query_identity(out, query_identity_rows, query_similarity_rows):
+def _write_query_identity(out: TextIO, query_identity_rows: list[IdentityRow],
+                          query_similarity_rows: list[SimilarityPair] | None) -> None:
     out.write("## Query Identity\n\n")
     if not query_identity_rows:
         out.write("No statements identified.\n\n")
         return
-    clusters = {}
+    clusters: dict[str, list[IdentityRow]] = {}
     for row in query_identity_rows:
-        clusters.setdefault(row["core_id"], []).append(row)
+        clusters.setdefault(row.core_id, []).append(row)
     ranked = sorted(clusters.items(), key=lambda kv: (-len(kv[1]), kv[0]))
     out.write("{} statement(s) across {} distinct core_id(s). Top clusters by size below "
               "-- full list in refs_query_identity.tsv, pairwise similarity scores for "
@@ -275,7 +287,7 @@ def _write_query_identity(out, query_identity_rows, query_similarity_rows):
                   len(query_identity_rows), len(clusters)))
     out.write("| core_id | Members | Example |\n|---|---:|---|\n")
     for core_id, rows in ranked[:MAX_GROUPED_VALUES]:
-        example = "{}:{}".format(rows[0]["file"], rows[0]["line"])
+        example = "{}:{}".format(rows[0].file, rows[0].line)
         out.write("| `{}` | {} | `{}` |\n".format(md_escape(core_id), len(rows), md_escape(example)))
     if len(ranked) > MAX_GROUPED_VALUES:
         out.write("\n_...+{} more core_id(s), see refs_query_identity.tsv._\n".format(
@@ -286,7 +298,7 @@ def _write_query_identity(out, query_identity_rows, query_similarity_rows):
                   "refs_query_similarity.tsv for the full list.\n\n".format(len(query_similarity_rows)))
 
 
-def _write_select_blocks(out, select_block_counts):
+def _write_select_blocks(out: TextIO, select_block_counts: dict[str, int]) -> None:
     out.write("## Select Blocks\n\n")
     nonzero = {f: c for f, c in select_block_counts.items() if c > 0}
     if not nonzero:
@@ -298,18 +310,24 @@ def _write_select_blocks(out, select_block_counts):
     out.write("| **Total** | **{}** |\n\n".format(sum(nonzero.values())))
 
 
-def write_markdown_report(path, run_info, hits, name_candidates, previously_bad, new_bad,
-                          stopwords_count, stopwords_freshly_created,
-                          known_names_count, known_names_freshly_created,
-                          refs=None, function_calls=None,
-                          relations_summary=None, select_block_counts=None,
-                          query_identity_rows=None, query_similarity_rows=None):
+def write_markdown_report(path: str, run_info: dict[str, Any], hits: list[Finding],
+                          name_candidates: list[str], previously_bad: dict[str, str],
+                          new_bad: dict[str, str],
+                          stopwords_count: int, stopwords_freshly_created: bool,
+                          known_names_count: int, known_names_freshly_created: bool,
+                          table_uses: list[TableUse] | None = None,
+                          column_uses: list[ColumnUse] | None = None,
+                          function_calls: list[FunctionCall] | None = None,
+                          relations_summary: list[RelationRollup] | None = None,
+                          select_block_counts: dict[str, int] | None = None,
+                          query_identity_rows: list[IdentityRow] | None = None,
+                          query_similarity_rows: list[SimilarityPair] | None = None) -> None:
     """Writes summary.md, a fixed-size index into every artifact a scan
     produces (not a duplicate of any of them). Sections are written in
     order: run info, Sensitive Findings (with per-file detail subsections),
     String Occurrences, Bad Files, Stopwords, Known Names, then the opt-in
     sections -- Table & Column References / Functions / Relations / Query
-    Identity, gated by `refs`/`function_calls`/`relations_summary`/
+    Identity, gated by `table_uses`/`function_calls`/`relations_summary`/
     `query_identity_rows` being non-None (i.e. --extract-metadata); Select
     Blocks, gated by `select_block_counts` being non-None (i.e.
     --split-selects). A gated section is omitted entirely rather than
@@ -326,8 +344,8 @@ def write_markdown_report(path, run_info, hits, name_candidates, previously_bad,
         _write_bad_files(out, previously_bad, new_bad)
         _write_stopwords(out, stopwords_count, stopwords_freshly_created)
         _write_known_names(out, known_names_count, known_names_freshly_created)
-        if refs is not None:
-            _write_references(out, refs)
+        if table_uses is not None:
+            _write_references(out, table_uses, column_uses or [])
         if function_calls is not None:
             _write_functions(out, function_calls)
         if relations_summary is not None:
@@ -338,7 +356,7 @@ def write_markdown_report(path, run_info, hits, name_candidates, previously_bad,
             _write_select_blocks(out, select_block_counts)
 
 
-def write_strings_file(path, name_candidates):
+def write_strings_file(path: str, name_candidates: list[str]) -> None:
     """Write all unique name-like literals not yet classified into either
     known_names.txt or stopwords.txt (live code and comments alike, since
     comment-context examples still need triage), one per line, in the same
@@ -357,27 +375,37 @@ def write_strings_file(path, name_candidates):
             out.write("{}   # {} occurrence(s)\n".format(word, counts[word]))
 
 
-def _clean(v):
+def _clean(v: object) -> str:
     """One TSV field: tabs/newlines inside a field would break TSV columns."""
     return str(v).replace("\t", " ").replace("\r", " ").replace("\n", " ")
 
 
-def write_refs_tsv(path, headers, rows):
+def _cell(v: object) -> object:
+    """A list/tuple attribute renders as one '; '-joined TSV cell (e.g. a
+    rollup's predicates, an identity row's columns)."""
+    if isinstance(v, (list, tuple)):
+        return "; ".join(str(item) for item in v)
+    return v
+
+
+def write_refs_tsv(path: str, headers: list[str], rows: Iterable[object]) -> None:
     """Generic TSV writer for the --extract-metadata artifacts
     (refs_tables.tsv, refs_columns.tsv, refs_functions.tsv,
     refs_relations.tsv, refs_query_*.tsv), same conventions as
     write_tsv_report (utf-8-sig, tab-separated, header row always written
     even for an empty `rows` list, embedded tabs/newlines stripped).
-    `rows` is a list of dicts; only the keys named in `headers` are
-    written, in that order -- generic over each file's differing column
-    set (refs_tables.tsv has no "column" field, refs_columns.tsv does)."""
+    `rows` is a list of model objects; only the attributes named in
+    `headers` are written, in that order -- generic over each file's
+    differing column set (refs_tables.tsv has no "column" field,
+    refs_columns.tsv does). A list/tuple attribute is joined with '; '
+    into one cell (see _cell)."""
     with open(path, "w", encoding="utf-8-sig", newline="") as out:
         out.write("\t".join(headers) + "\n")
         for row in rows:
-            out.write("\t".join(_clean(row[h]) for h in headers) + "\n")
+            out.write("\t".join(_clean(_cell(getattr(row, h))) for h in headers) + "\n")
 
 
-def write_tsv_report(path, findings):
+def write_tsv_report(path: str, findings: list[Finding]) -> None:
     """Tab-separated report for pasting/filtering in Excel.
     Directory and file name are separate columns for easy filtering, and
     in_comment (Y/N) lets you filter live vs. commented-out findings
@@ -388,7 +416,7 @@ def write_tsv_report(path, findings):
     with open(path, "w", encoding="utf-8-sig", newline="") as out:
         out.write("\t".join(headers) + "\n")
         for f in findings:
-            directory, file_name = os.path.split(f["file"])
-            row = [f["severity"], f["in_comment"], directory, file_name, f["line"],
-                   f["column_name"], f["operator"], f["value"], f["snippet"]]
+            directory, file_name = os.path.split(f.file)
+            row = [f.severity, f.in_comment, directory, file_name, f.line,
+                   f.column_name, f.operator, f.value, f.snippet]
             out.write("\t".join(_clean(v) for v in row) + "\n")

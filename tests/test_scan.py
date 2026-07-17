@@ -21,14 +21,14 @@ import src  # noqa: E402  (bootstraps generated/ onto sys.path)
 from src import mask  # noqa: E402
 from src import scan as scanner  # noqa: E402
 from src.split.select_blocks import select_block_ranges  # noqa: E402
-from src.detect.statement_driver import chunk_ranges, lex_file  # noqa: E402
+from src.parsing.statement_driver import chunk_ranges, lex_file  # noqa: E402
 
 
 def scan(filename, stopwords=None, known_names=None):
     path = os.path.join(FIXTURES_DIR, filename)
-    hits, name_candidates, _refs, _rel, _sbc, _fc, _qi, _bad = scanner.scan_file(
+    result = scanner.scan_file(
         path, scanner.DEFAULT_COLUMNS, stopwords or set(), known_names or set())
-    return hits, name_candidates
+    return result.findings, result.name_candidates
 
 
 def scan_text(text, stopwords=None, known_names=None):
@@ -39,9 +39,9 @@ def scan_text(text, stopwords=None, known_names=None):
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(text)
-        hits, name_candidates, _refs, _rel, _sbc, _fc, _qi, _bad = scanner.scan_file(
+        result = scanner.scan_file(
             path, scanner.DEFAULT_COLUMNS, stopwords or set(), known_names or set())
-        return hits, name_candidates
+        return result.findings, result.name_candidates
     finally:
         os.unlink(path)
 
@@ -52,12 +52,12 @@ class TestBasicHit(unittest.TestCase):
         self.assertEqual(len(name_candidates), 0)
         self.assertEqual(len(hits), 1)
         h = hits[0]
-        self.assertEqual(h["severity"], "FINDING")
-        self.assertEqual(h["column_name"], "ACCT_ID")
-        self.assertEqual(h["operator"], "=")
-        self.assertEqual(h["value"], "'0000001'")
-        self.assertEqual(h["in_comment"], "N")
-        self.assertEqual(h["line"], 3)
+        self.assertEqual(h.severity, "FINDING")
+        self.assertEqual(h.column_name, "ACCT_ID")
+        self.assertEqual(h.operator, "=")
+        self.assertEqual(h.value, "'0000001'")
+        self.assertEqual(h.in_comment, "N")
+        self.assertEqual(h.line, 3)
 
 
 class TestOperators(unittest.TestCase):
@@ -65,32 +65,32 @@ class TestOperators(unittest.TestCase):
         hits, name_candidates = scan("02_operators.sql")
         self.assertEqual(len(name_candidates), 0)
         self.assertEqual(len(hits), 8)
-        self.assertTrue(all(h["severity"] == "FINDING" for h in hits))
+        self.assertTrue(all(h.severity == "FINDING" for h in hits))
 
-        ops = [h["operator"] for h in hits]
-        values = set(h["value"] for h in hits)
+        ops = [h.operator for h in hits]
+        values = set(h.value for h in hits)
 
         # no-space equals
         self.assertIn("=", ops)
         self.assertIn("'0000002'", values)
 
         # IN(...) exploded into one row per literal
-        in_hits = [h for h in hits if h["operator"] == "IN"]
+        in_hits = [h for h in hits if h.operator == "IN"]
         self.assertEqual(len(in_hits), 3)
-        self.assertEqual({h["value"] for h in in_hits},
+        self.assertEqual({h.value for h in in_hits},
                          {"'1000001'", "'1000002'", "'1000003'"})
 
         # BETWEEN ... AND ... exploded into two rows
-        between_hits = [h for h in hits if h["operator"] == "BETWEEN"]
+        between_hits = [h for h in hits if h.operator == "BETWEEN"]
         self.assertEqual(len(between_hits), 2)
-        self.assertEqual({h["value"] for h in between_hits},
+        self.assertEqual({h.value for h in between_hits},
                          {"'0000010'", "'0000099'"})
 
         # reversed literal-first comparison
-        reversed_hits = [h for h in hits if h["value"] == "'0000123'"]
+        reversed_hits = [h for h in hits if h.value == "'0000123'"]
         self.assertEqual(len(reversed_hits), 1)
-        self.assertEqual(reversed_hits[0]["column_name"], "ACCT_ID")
-        self.assertEqual(reversed_hits[0]["operator"], "=")
+        self.assertEqual(reversed_hits[0].column_name, "ACCT_ID")
+        self.assertEqual(reversed_hits[0].operator, "=")
 
         # <>
         self.assertIn("<>", ops)
@@ -102,16 +102,16 @@ class TestMultiline(unittest.TestCase):
         hits, name_candidates = scan("03_multiline.sql")
         self.assertEqual(len(name_candidates), 0)
         self.assertEqual(len(hits), 1)
-        self.assertEqual(hits[0]["value"], "'0000030'")
-        self.assertEqual(hits[0]["line"], 3)
-        self.assertEqual(hits[0]["in_comment"], "N")
+        self.assertEqual(hits[0].value, "'0000030'")
+        self.assertEqual(hits[0].line, 3)
+        self.assertEqual(hits[0].in_comment, "N")
         # offset-based, so the operator and literal sitting on different
         # source lines doesn't matter -- the span still slices back to
         # exactly the literal text (needed for --mask-literals).
         path = os.path.join(FIXTURES_DIR, "03_multiline.sql")
         with open(path, encoding="utf-8") as f:
             text = f.read()
-        start, end = hits[0]["start_offset"], hits[0]["end_offset"]
+        start, end = hits[0].start_offset, hits[0].end_offset
         self.assertEqual(text[start:end + 1], "'0000030'")
 
 
@@ -121,18 +121,18 @@ class TestComments(unittest.TestCase):
         self.assertEqual(len(name_candidates), 0)
         self.assertEqual(len(hits), 3)
 
-        by_value = {h["value"]: h for h in hits}
+        by_value = {h.value: h for h in hits}
         self.assertEqual(set(by_value), {"'0000040'", "'0000041'", "'0000042'"})
 
-        self.assertEqual(by_value["'0000040'"]["severity"], "FINDING")
-        self.assertEqual(by_value["'0000040'"]["in_comment"], "Y")
+        self.assertEqual(by_value["'0000040'"].severity, "FINDING")
+        self.assertEqual(by_value["'0000040'"].in_comment, "Y")
 
-        self.assertEqual(by_value["'0000041'"]["severity"], "FINDING")
-        self.assertEqual(by_value["'0000041'"]["in_comment"], "Y")
-        self.assertEqual(by_value["'0000041'"]["line"], 6)
+        self.assertEqual(by_value["'0000041'"].severity, "FINDING")
+        self.assertEqual(by_value["'0000041'"].in_comment, "Y")
+        self.assertEqual(by_value["'0000041'"].line, 6)
 
-        self.assertEqual(by_value["'0000042'"]["severity"], "FINDING")
-        self.assertEqual(by_value["'0000042'"]["in_comment"], "N")
+        self.assertEqual(by_value["'0000042'"].severity, "FINDING")
+        self.assertEqual(by_value["'0000042'"].in_comment, "N")
 
 
 class TestKoreanNames(unittest.TestCase):
@@ -147,10 +147,10 @@ class TestKoreanNames(unittest.TestCase):
         hits, name_candidates = scan("05_korean_names.sql", known_names={"홍길동"})
         self.assertEqual(len(hits), 1)
         h = hits[0]
-        self.assertEqual(h["severity"], "FINDING")
-        self.assertEqual(h["column_name"], "-")
-        self.assertEqual(h["operator"], "-")
-        self.assertEqual(h["value"], "'홍길동'")
+        self.assertEqual(h.severity, "FINDING")
+        self.assertEqual(h.column_name, "-")
+        self.assertEqual(h.operator, "-")
+        self.assertEqual(h.value, "'홍길동'")
         self.assertEqual(name_candidates, ["강남구"])
 
     def test_stopword_excluded(self):
@@ -169,10 +169,10 @@ class TestKoreanNames(unittest.TestCase):
             'SELECT * FROM t1 WHERE HLDR_NM = "홍길동";', known_names={"홍길동"})
         self.assertEqual(len(hits), 1)
         h = hits[0]
-        self.assertEqual(h["value"], "'홍길동'")  # normalized in the dict
+        self.assertEqual(h.value, "'홍길동'")  # normalized in the dict
         # but the actual source text at the recorded span is double-quoted
         source = 'SELECT * FROM t1 WHERE HLDR_NM = "홍길동";'
-        self.assertEqual(source[h["start_offset"]:h["end_offset"] + 1], '"홍길동"')
+        self.assertEqual(source[h.start_offset:h.end_offset + 1], '"홍길동"')
 
 
 class TestFalsePositives(unittest.TestCase):
@@ -186,22 +186,22 @@ class TestFalsePositives(unittest.TestCase):
         self.assertEqual(len(name_candidates), 0)
         # only the two real values should be reported: '0000080' (from the
         # IN-list, alongside a blank that must be dropped) and '0000081'
-        self.assertEqual({h["value"] for h in hits}, {"'0000080'", "'0000081'"})
+        self.assertEqual({h.value for h in hits}, {"'0000080'", "'0000081'"})
 
     def test_paren_list_does_not_cross_statement_boundary(self):
         hits, name_candidates = scan("09_paren_list_boundary.sql")
         self.assertEqual(len(name_candidates), 0)
-        by_value = {h["value"]: h for h in hits}
+        by_value = {h.value: h for h in hits}
         # the malformed/truncated "ctrt_no in ('0000099'" left in a comment
         # must NOT match at all (no closing paren on its own line) -- in
         # particular it must not swallow the live ACCT_ID on the next line
         # and mis-report it as a CTRT_NO value from the comment's line
-        self.assertNotIn("CTRT_NO", {h["column_name"] for h in hits})
-        self.assertEqual(by_value["'0000050'"]["column_name"], "ACCT_ID")
-        self.assertEqual(by_value["'0000050'"]["line"], 3)
-        self.assertEqual(by_value["'0000050'"]["in_comment"], "N")
-        self.assertEqual(by_value["'0000100'"]["column_name"], "ACCT_ID")
-        self.assertEqual(by_value["'0000100'"]["line"], 5)
+        self.assertNotIn("CTRT_NO", {h.column_name for h in hits})
+        self.assertEqual(by_value["'0000050'"].column_name, "ACCT_ID")
+        self.assertEqual(by_value["'0000050'"].line, 3)
+        self.assertEqual(by_value["'0000050'"].in_comment, "N")
+        self.assertEqual(by_value["'0000100'"].column_name, "ACCT_ID")
+        self.assertEqual(by_value["'0000100'"].line, 5)
         # a legitimate multi-line IN(...) with an inline comment between
         # values must still be fully detected
         self.assertEqual(
@@ -216,23 +216,23 @@ class TestFalsePositives(unittest.TestCase):
         # hardcoded literal list -- neither the inner literal '02' (bound
         # to STAT_CD, an unconfigured column here) nor '2001' (digits out
         # of the inner table name TBSAMPLE001) may be attributed to CTRT_NO
-        self.assertNotIn("CTRT_NO", {h["column_name"] for h in hits})
-        self.assertEqual({h["value"] for h in hits}, {"'0000123'"})
+        self.assertNotIn("CTRT_NO", {h.column_name for h in hits})
+        self.assertEqual({h.value for h in hits}, {"'0000123'"})
 
     def test_digit_suffix_of_identifier_is_not_a_literal(self):
         hits, name_candidates = scan("11_digit_boundary.sql")
         self.assertEqual(len(name_candidates), 0)
         # "2001" out of table name TBSAMPLE001 must never be extracted as a
         # bare numeric literal just because "=CTRT_NO" happens to follow
-        self.assertEqual({h["value"] for h in hits}, {"12345"})
-        self.assertEqual(hits[0]["column_name"], "ACCT_ID")
+        self.assertEqual({h.value for h in hits}, {"12345"})
+        self.assertEqual(hits[0].column_name, "ACCT_ID")
         # An unquoted numeric literal's offsets must slice back to just the
         # digits, no surrounding quotes to worry about (relevant for
         # --mask-literals' numeric-vs-quoted classification).
         path = os.path.join(FIXTURES_DIR, "11_digit_boundary.sql")
         with open(path, encoding="utf-8") as f:
             text = f.read()
-        start, end = hits[0]["start_offset"], hits[0]["end_offset"]
+        start, end = hits[0].start_offset, hits[0].end_offset
         self.assertEqual(text[start:end + 1], "12345")
 
     def test_empty_paren_list_is_not_a_value(self):
@@ -244,8 +244,8 @@ class TestFalsePositives(unittest.TestCase):
         # ACCT_ID IN ( <blank> ) must produce zero findings: there's no
         # literal inside any of them, so nothing sensitive was found --
         # not "the empty parens themselves are the finding".
-        self.assertEqual({h["value"] for h in hits}, {"'0000123'"})
-        self.assertNotIn("CTRT_NO", {h["column_name"] for h in hits})
+        self.assertEqual({h.value for h in hits}, {"'0000123'"})
+        self.assertNotIn("CTRT_NO", {h.column_name for h in hits})
 
     def test_comment_escape_discards_match_but_recovers_hidden_live_hit(self):
         hits, name_candidates = scan("13_comment_escape_recovery.sql")
@@ -257,11 +257,11 @@ class TestFalsePositives(unittest.TestCase):
         # blocked, silently swallow and lose that live match entirely.
         # Neither must happen: no CTRT_NO finding at all, and both real,
         # live ACCT_ID values are independently detected on their own line.
-        self.assertNotIn("CTRT_NO", {h["column_name"] for h in hits})
-        by_value = {h["value"]: h for h in hits}
-        self.assertEqual(by_value["'0000050'"]["line"], 4)
-        self.assertEqual(by_value["'0000050'"]["in_comment"], "N")
-        self.assertEqual(by_value["'0000100'"]["line"], 6)
+        self.assertNotIn("CTRT_NO", {h.column_name for h in hits})
+        by_value = {h.value: h for h in hits}
+        self.assertEqual(by_value["'0000050'"].line, 4)
+        self.assertEqual(by_value["'0000050'"].in_comment, "N")
+        self.assertEqual(by_value["'0000100'"].line, 6)
         self.assertEqual(len(hits), 2)
 
 
@@ -274,9 +274,9 @@ class TestAliasQualifiedColumn(unittest.TestCase):
         hits, name_candidates = scan_text("SELECT * FROM t1 a WHERE a.ACCT_ID = '0000001';")
         self.assertEqual(len(name_candidates), 0)
         self.assertEqual(len(hits), 1)
-        self.assertEqual(hits[0]["column_name"], "ACCT_ID")
-        self.assertEqual(hits[0]["operator"], "=")
-        self.assertEqual(hits[0]["value"], "'0000001'")
+        self.assertEqual(hits[0].column_name, "ACCT_ID")
+        self.assertEqual(hits[0].operator, "=")
+        self.assertEqual(hits[0].value, "'0000001'")
 
 
 class TestComplexRealWorldQuery(unittest.TestCase):
@@ -304,9 +304,9 @@ class TestComplexRealWorldQuery(unittest.TestCase):
         # tests/test_select_blocks.py; this test reads the classification
         # read-only instead so it stays independent of that).
         path = os.path.join(FIXTURES_DIR, "14_complex_multi_cte_query.sql")
-        hits, name_candidates, refs, _rel, _sbc, _fc, _qi, _bad = scanner.scan_file(
+        result = scanner.scan_file(
             path, scanner.DEFAULT_COLUMNS, set(), extract_table_refs=True)
-        tables = {r["table"] for r in refs if r["kind"] == "table"}
+        tables = {r.table for r in result.table_uses}
         self.assertEqual(tables, {"T1", "T2", "T_REF", "T_MAP", "T_CODE",
                                  "T_HIST", "SYSDUMMY1"})
         self.assertNotIn("CONFIG", tables)
@@ -323,23 +323,23 @@ class TestComplexRealWorldQuery(unittest.TestCase):
 
 class TestTxtExtension(unittest.TestCase):
     def test_txt_included_by_default(self):
-        hits, name_candidates, refs, rel, sbc, fc, bad, _qi, file_count = scanner.scan_tree(
+        tree = scanner.scan_tree(
             FIXTURES_DIR, scanner.DEFAULT_COLUMNS, set())
-        self.assertEqual(file_count, 38)  # 37 .sql + 1 .txt fixture
-        self.assertTrue(any(h["value"] == "'0000070'" for h in hits))
+        self.assertEqual(tree.file_count, 38)  # 37 .sql + 1 .txt fixture
+        self.assertTrue(any(h.value == "'0000070'" for h in tree.findings))
 
     def test_sql_only_when_requested(self):
-        hits, name_candidates, refs, rel, sbc, fc, bad, _qi, file_count = scanner.scan_tree(
+        tree = scanner.scan_tree(
             FIXTURES_DIR, scanner.DEFAULT_COLUMNS, set(), extensions=["sql"])
-        self.assertEqual(file_count, 37)
-        self.assertFalse(any(h["value"] == "'0000070'" for h in hits))
+        self.assertEqual(tree.file_count, 37)
+        self.assertFalse(any(h.value == "'0000070'" for h in tree.findings))
 
     def test_exclude_paths_skips_own_output_files(self):
         excluded = {os.path.abspath(os.path.join(FIXTURES_DIR, "07_from_txt_export.txt"))}
-        hits, name_candidates, refs, rel, sbc, fc, bad, _qi, file_count = scanner.scan_tree(
+        tree = scanner.scan_tree(
             FIXTURES_DIR, scanner.DEFAULT_COLUMNS, set(), exclude_paths=excluded)
-        self.assertEqual(file_count, 37)
-        self.assertFalse(any(h["value"] == "'0000070'" for h in hits))
+        self.assertEqual(tree.file_count, 37)
+        self.assertFalse(any(h.value == "'0000070'" for h in tree.findings))
 
 
 class TestMaskingEndToEnd(unittest.TestCase):
@@ -369,10 +369,11 @@ class TestMaskingEndToEnd(unittest.TestCase):
         shutil.rmtree(self.d)
 
     def test_masking_pipeline(self):
-        hits, name_candidates, _refs, _rel, _sbc, _fc, _qi, _bad = scanner.scan_file(
+        result = scanner.scan_file(
             self.path, scanner.DEFAULT_COLUMNS, set(), self.KNOWN_NAMES)
+        hits = result.findings
         self.assertEqual(len(hits), 15)
-        self.assertEqual(name_candidates, [])
+        self.assertEqual(result.name_candidates, [])
 
         written = mask.write_masked_files(hits)
         self.assertEqual(written, [self.path])
@@ -382,7 +383,7 @@ class TestMaskingEndToEnd(unittest.TestCase):
 
         # No original literal value survives in the masked output ...
         for f in hits:
-            self.assertNotIn(f["value"].strip("'\""), masked_text)
+            self.assertNotIn(f.value.strip("'\""), masked_text)
         # ... but every quote/paren/keyword/structural character is
         # unchanged: stripping the placeholder runs from both texts must
         # leave them identical.
@@ -400,14 +401,14 @@ class TestMaskingEndToEnd(unittest.TestCase):
         # shapes (column/operator against a literal -- the placeholder is
         # still a literal), and re-masking must be a no-op: '****'/'0000'
         # simply mask to themselves.
-        hits, _name_candidates, _refs, _rel, _sbc, _fc, _qi, _bad = scanner.scan_file(
-            self.path, scanner.DEFAULT_COLUMNS, set(), self.KNOWN_NAMES)
+        hits = scanner.scan_file(
+            self.path, scanner.DEFAULT_COLUMNS, set(), self.KNOWN_NAMES).findings
         mask.write_masked_files(hits)
         with open(self.path, encoding="utf-8") as f:
             once = f.read()
 
-        hits2, _name_candidates2, _refs, _rel, _sbc, _fc, _qi, _bad = scanner.scan_file(
-            self.path, scanner.DEFAULT_COLUMNS, set(), self.KNOWN_NAMES)
+        hits2 = scanner.scan_file(
+            self.path, scanner.DEFAULT_COLUMNS, set(), self.KNOWN_NAMES).findings
         mask.write_masked_files(hits2)
         with open(self.path, encoding="utf-8") as f:
             twice = f.read()
@@ -433,10 +434,10 @@ class TestSplitOutputNeverRescannedAsInput(unittest.TestCase):
         shutil.rmtree(self.d)
 
     def test_split_output_excluded_from_file_count_and_hits(self):
-        hits, name_candidates, refs, rel, sbc, fc, bad, _qi, file_count = scanner.scan_tree(
+        tree = scanner.scan_tree(
             self.d, scanner.DEFAULT_COLUMNS, set())
-        self.assertEqual(file_count, 1)
-        self.assertEqual(len(hits), 1)
+        self.assertEqual(tree.file_count, 1)
+        self.assertEqual(len(tree.findings), 1)
 
 
 if __name__ == "__main__":

@@ -47,7 +47,7 @@ restricted environment.
   to add the also-valid, commonly-used `FETCH FIRST ... ROWS ONLY` form
   (the grammar previously modeled only `FETCH NEXT`). Both `NEXT` and
   `FIRST` already existed as lexer tokens, so this was a one-line grammar
-  change, not a new token. `Db2Lexer.g4` is unmodified. This is called out
+  change, not a new token. This is called out
   here per the file actually having changed, not as a formality --
   `tests/test_grammar_smoke.py`'s `TestFetchRowLimiting` pins down both
   forms parsing identically.
@@ -76,6 +76,29 @@ restricted environment.
   antlr/grammars-v4#4936 for the upstream PR against the source grammar.
   `tests/test_grammar_fix_regression.py` pins all three down end-to-end
   through the actual scan pipeline, not just at the grammar-rule level.
+
+  A third round of modifications fixed three more parse-path gaps found
+  while hardening SQL query identification:
+
+  1. `function_name` gained explicit alternatives for common DB2 built-in
+     names that are reserved lexer tokens rather than plain `ID`
+     (`COUNT`, `MAX`, `LOWER`, `CONCAT`, `LENGTH`, `VALUE`, `CHAR`,
+     `DATE`, `TIME`, `TIMESTAMP`, `DECIMAL`, `INT`, `INTEGER`,
+     `REPLACE`), so `SELECT COUNT(x) ...` parses as one clean tree
+     instead of shredding into resync fragments. Reserved names with an
+     expression-position role of their own (`EXISTS`, `CAST`,
+     `YEAR`/`MONTH`/... labeled durations) were deliberately excluded to
+     avoid ambiguity.
+  2. `having_clause` was `: search_condition ;` with no `HAVING` keyword
+     at all -- and no `HAVING` token existed in `Db2Lexer.g4` (the only
+     lexer modification to date adds it). Any statement with a HAVING
+     clause previously failed to parse past its GROUP BY.
+  3. `order_by_clause` was missing its leading `ORDER BY` tokens (compare
+     `window_order_clause`, which has them), so `GROUP BY ... ORDER BY`
+     failed with `mismatched input 'BY' expecting 'OF'`.
+
+  `tests/test_query_identity_complex.py` pins these end-to-end through
+  the scan pipeline.
 - **Why this grammar over the previously-used Oracle PL/SQL grammar**:
   this project originally used `sql/plsql` (Oracle's grammar) as a
   stand-in, on the mistaken belief that no maintained DB2 grammar existed

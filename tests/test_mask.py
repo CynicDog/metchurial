@@ -19,6 +19,14 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import src  # noqa: E402  (bootstraps generated/ onto sys.path)
 from src.mask import mask_text, write_masked_files  # noqa: E402
+from src.models.findings import Finding  # noqa: E402
+
+
+def _finding(path, start, end):
+    """Minimal Finding carrying just what masking consumes."""
+    return Finding(severity="FINDING", file=path, line=1, column_name="C",
+                   operator="=", value="", snippet="", encoding="utf-8",
+                   in_comment="N", start_offset=start, end_offset=end)
 
 
 class TestMaskText(unittest.TestCase):
@@ -133,7 +141,7 @@ class TestWriteMaskedFiles(unittest.TestCase):
         content = "SELECT * FROM t WHERE ACCT_ID = '0000001';"
         path = self._write("report.sql", content)
         start, end = self._span_of(content, "'0000001'")
-        findings = [{"file": path, "start_offset": start, "end_offset": end}]
+        findings = [_finding(path, start, end)]
 
         written = write_masked_files(findings)
 
@@ -148,7 +156,7 @@ class TestWriteMaskedFiles(unittest.TestCase):
         content = "SELECT * FROM t WHERE ACCT_ID = '0000001';"
         path = self._write("report.sql", content)
         start, end = self._span_of(content, "'0000001'")
-        findings = [{"file": path, "start_offset": start, "end_offset": end}]
+        findings = [_finding(path, start, end)]
 
         written = write_masked_files(findings)
 
@@ -160,7 +168,7 @@ class TestWriteMaskedFiles(unittest.TestCase):
         content = "SELECT * FROM t WHERE ACCT_ID = '0000001';"
         path = self._write("report.sql", content, encoding="utf-8-sig")
         start, end = self._span_of(content, "'0000001'")
-        findings = [{"file": path, "start_offset": start, "end_offset": end}]
+        findings = [_finding(path, start, end)]
 
         written = write_masked_files(findings)
 
@@ -172,7 +180,7 @@ class TestWriteMaskedFiles(unittest.TestCase):
         content = "SELECT * FROM t WHERE ACCT_ID = NULL;"
         path = self._write("report.sql", content)
         start, end = self._span_of(content, "NULL")
-        findings = [{"file": path, "start_offset": start, "end_offset": end}]
+        findings = [_finding(path, start, end)]
 
         written = write_masked_files(findings)
 
@@ -183,7 +191,7 @@ class TestWriteMaskedFiles(unittest.TestCase):
     def test_finding_missing_offsets_is_ignored(self):
         content = "SELECT * FROM t WHERE ACCT_ID = '0000001';"
         path = self._write("report.sql", content)
-        findings = [{"file": path, "start_offset": None, "end_offset": None}]
+        findings = [_finding(path, None, None)]
 
         written = write_masked_files(findings)
 

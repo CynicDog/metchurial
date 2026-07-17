@@ -13,6 +13,8 @@ always the same chunk by construction (a WITH clause contains no
 top-level ';').
 """
 
+from __future__ import annotations
+
 import os
 import re
 
@@ -20,13 +22,14 @@ from antlr4.Token import Token
 
 from Db2Lexer import Db2Lexer
 
-from src.token_walk import skip_balanced_parens as _skip_balanced_parens
-from src.token_walk import skip_hidden as _skip_hidden
+from src.references.table_scan import looks_like_name_start as _looks_like_name_start
+from src.parsing.token_walk import skip_balanced_parens as _skip_balanced_parens
+from src.parsing.token_walk import skip_hidden as _skip_hidden
 
 _SPLIT_SUFFIX_RE = re.compile(r"-\d{2,}(\.[^.]+)?$")
 
 
-def classify_chunk(all_tokens, start, end):
+def classify_chunk(all_tokens: list[Token], start: int, end: int) -> bool:
     """True iff all_tokens[start:end) is a standalone SELECT block: its
     first default-channel token is SELECT, or WITH followed by a CTE list
     (tracking paren depth) that eventually reaches SELECT. Any other
@@ -43,7 +46,7 @@ def classify_chunk(all_tokens, start, end):
 
     i = _skip_hidden(all_tokens, i + 1, n)
     while i is not None:
-        if all_tokens[i].type != Db2Lexer.ID:
+        if all_tokens[i].type == Db2Lexer.SELECT or not _looks_like_name_start(all_tokens[i]):
             return False
         i = _skip_hidden(all_tokens, i + 1, n)
         if i is not None and all_tokens[i].type == Db2Lexer.LEFT_RND_BKT:
@@ -62,7 +65,8 @@ def classify_chunk(all_tokens, start, end):
     return i is not None and all_tokens[i].type == Db2Lexer.SELECT
 
 
-def select_block_ranges(all_tokens, ranges):
+def select_block_ranges(all_tokens: list[Token],
+                        ranges: list[tuple[int, int]]) -> list[tuple[int, int]]:
     """ranges: statement_driver.chunk_ranges(all_tokens) (passed in, not
     recomputed). Returns the subsequence classified True, in source
     order -- both the count (len(...)) and, when --split-selects is on,
@@ -70,7 +74,7 @@ def select_block_ranges(all_tokens, ranges):
     return [r for r in ranges if classify_chunk(all_tokens, r[0], r[1])]
 
 
-def chunk_source_text(text, all_tokens, start, end):
+def chunk_source_text(text: str, all_tokens: list[Token], start: int, end: int) -> str:
     """text[first_real.start : last_real.stop + 1], where first_real/
     last_real are the first/last non-EOF tokens in all_tokens[start:end)
     -- guards the degenerate EOF token start/stop in the last chunk range
@@ -87,7 +91,7 @@ def chunk_source_text(text, all_tokens, start, end):
     return text[real[0].start:real[-1].stop + 1].lstrip("\r\n \t")
 
 
-def looks_like_split_output(filename):
+def looks_like_split_output(filename: str) -> bool:
     """True if `filename`'s stem already ends in -NN (2+ digits) right
     before the extension (or at the very end, if there's no extension) --
     i.e. this file is itself a previously-written split-select output.
@@ -96,7 +100,8 @@ def looks_like_split_output(filename):
     return _SPLIT_SUFFIX_RE.search(os.path.basename(filename)) is not None
 
 
-def write_split_files(path, text, all_tokens, ranges):
+def write_split_files(path: str, text: str, all_tokens: list[Token],
+                      ranges: list[tuple[int, int]]) -> list[str]:
     """path: the original file's path. For each range in `ranges`
     (already filtered to standalone SELECT blocks via select_block_ranges,
     in source order), writes "<stem>-NN<ext>" (zero-padded to at least 2

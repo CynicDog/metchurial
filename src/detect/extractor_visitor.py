@@ -10,7 +10,7 @@ Grammar notes (see docs/PROVENANCE.md):
   single, unlabeled `predicate` rule (antlr/grammars-v4's sql/db2 grammar),
   so the generated PredicateContext class merges 20+ alternatives into one
   set of accessors -- which alt actually fired is determined by checking
-  which accessor methods are non-None (src.predicates.classify_predicate),
+  which accessor methods are non-None (src.parsing.predicates.classify_predicate),
   not by dispatching on subclass. Pinned by tests/test_grammar_smoke.py
   against the real generated parser.
 - `expression`'s leaf alternatives (`column_name`, `constant_`) are direct
@@ -44,13 +44,20 @@ Grammar notes (see docs/PROVENANCE.md):
   tests/test_scan.py).
 """
 
+from __future__ import annotations
+
+from typing import Any, Callable, Iterable
+
 from Db2Parser import Db2Parser
 from Db2ParserVisitor import Db2ParserVisitor
 
-from src.predicates import COMPARISON_OPS, classify_predicate
+from src.parsing.predicates import COMPARISON_OPS, classify_predicate
+
+# sink(column, operator, value, line, start_offset, end_offset)
+FindingSink = Callable[[str, str, str, int, int, int], None]
 
 
-def _unwrap_parens(ctx):
+def _unwrap_parens(ctx: Any) -> Any:
     """A redundant `'(' expression_list ')'` wrapping exactly one inner
     expression -- e.g. `('0000001')` as an IN-list item, or a subquery
     wrapped in an extra parens layer -- parses as its own ExpressionContext
@@ -68,7 +75,7 @@ def _unwrap_parens(ctx):
     return ctx
 
 
-def as_column(ctx, columns):
+def as_column(ctx: Any, columns: set[str]) -> str | None:
     """columns: set of upper-cased sensitive column names. Returns the
     upper-cased column name if `ctx` (an ExpressionContext) is a bare
     reference to one of them, else None. Checks both `column_name` (a
@@ -91,7 +98,7 @@ def as_column(ctx, columns):
     return None
 
 
-def as_literal(ctx):
+def as_literal(ctx: Any) -> tuple[str, tuple[int, int]] | None:
     """Returns (value, (start_offset, end_offset)) -- the literal's raw
     source text (quotes included) plus its exact 0-based
     inclusive-inclusive character span in the original source -- if `ctx`
@@ -113,7 +120,7 @@ def as_literal(ctx):
 
 class ExtractorVisitor(Db2ParserVisitor):
 
-    def __init__(self, columns, sink):
+    def __init__(self, columns: Iterable[str], sink: FindingSink) -> None:
         """columns: iterable of sensitive column names (any case).
         sink: callable(column, operator, value, line, start_offset,
         end_offset) invoked once per raw finding candidate. Blank-literal
@@ -122,10 +129,11 @@ class ExtractorVisitor(Db2ParserVisitor):
         self.columns = {c.upper() for c in columns}
         self.sink = sink
 
-    def _emit(self, column, operator, value, anchor_token, span):
+    def _emit(self, column: str, operator: str, value: str, anchor_token: Any,
+              span: tuple[int, int]) -> None:
         self.sink(column, operator, value, anchor_token.line, span[0], span[1])
 
-    def visitPredicate(self, ctx: Db2Parser.PredicateContext):
+    def visitPredicate(self, ctx: Db2Parser.PredicateContext) -> Any:
         op = classify_predicate(ctx)
         exprs = ctx.expression()
 
@@ -140,7 +148,7 @@ class ExtractorVisitor(Db2ParserVisitor):
 
         return self.visitChildren(ctx)
 
-    def _handle_comparison(self, left, right, operator):
+    def _handle_comparison(self, left: Any, right: Any, operator: str) -> None:
         left_col = as_column(left, self.columns)
         right_col = as_column(right, self.columns)
         left_lit = as_literal(left)
@@ -152,7 +160,8 @@ class ExtractorVisitor(Db2ParserVisitor):
             left_val, left_span = left_lit
             self._emit(right_col, operator, left_val, left.start, left_span)
 
-    def _handle_between(self, exprs, ctx, operator):
+    def _handle_between(self, exprs: list[Any], ctx: Db2Parser.PredicateContext,
+                        operator: str) -> None:
         col = as_column(exprs[0], self.columns)
         if not col:
             return
@@ -162,7 +171,8 @@ class ExtractorVisitor(Db2ParserVisitor):
                 val, span = lit
                 self._emit(col, operator, val, ctx.start, span)
 
-    def _handle_in(self, exprs, ctx, operator):
+    def _handle_in(self, exprs: list[Any], ctx: Db2Parser.PredicateContext,
+                   operator: str) -> None:
         col = as_column(exprs[0], self.columns)
         if not col:
             return
@@ -185,7 +195,8 @@ class ExtractorVisitor(Db2ParserVisitor):
                 val, span = lit
                 self._emit(col, operator, val, ctx.start, span)
 
-    def _handle_like(self, exprs, ctx, operator):
+    def _handle_like(self, exprs: list[Any], ctx: Db2Parser.PredicateContext,
+                     operator: str) -> None:
         col = as_column(exprs[0], self.columns)
         if not col:
             return

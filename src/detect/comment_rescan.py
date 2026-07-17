@@ -20,22 +20,26 @@ raw text there, with in_comment derived from the same comment-token spans
 this module also uses.
 """
 
+from __future__ import annotations
+
+from typing import Callable
+
 from antlr4.Token import Token
 
 from Db2Lexer import Db2Lexer
 from src.detect.extractor_visitor import ExtractorVisitor
-from src.detect.statement_driver import MAX_ITERATIONS_PER_CHUNK, parse_file
+from src.parsing.statement_driver import MAX_ITERATIONS_PER_CHUNK, parse_file
 from src.detect.supplementary_checks import make_token_scan_fallback
 
 _COMMENT_TOKEN_TYPES = (Db2Lexer.LINE_COMMENT, Db2Lexer.SQL_COMMENT)
 
 
-def comment_tokens(all_tokens):
+def comment_tokens(all_tokens: list[Token]) -> list[Token]:
     return [t for t in all_tokens
             if t.channel == Token.HIDDEN_CHANNEL and t.type in _COMMENT_TOKEN_TYPES]
 
 
-def _strip_comment_markers(token):
+def _strip_comment_markers(token: Token) -> str | None:
     """Return the comment's inner text (markers removed) -- re-lexing the
     raw token text as-is would just re-match the leading '--'/'/*' as
     another comment and swallow everything, producing nothing to parse."""
@@ -55,8 +59,9 @@ def _strip_comment_markers(token):
     return None
 
 
-def rescan_comments(all_tokens, columns, sink,
-                     max_iterations_per_chunk=MAX_ITERATIONS_PER_CHUNK):
+def rescan_comments(all_tokens: list[Token], columns: list[str],
+                     sink: Callable[[str, str, str, int, str, int, int], None],
+                     max_iterations_per_chunk: int = MAX_ITERATIONS_PER_CHUNK) -> None:
     """sink: callable(column, operator, value, line, in_comment,
     start_offset, end_offset) -- note the extra in_comment arg vs.
     ExtractorVisitor's own sink shape, since every finding produced here
@@ -83,8 +88,9 @@ def rescan_comments(all_tokens, columns, sink,
         # base_line, just for character offsets instead of line numbers.
         base_offset = tok.start + 2
 
-        def relocated_sink(column, operator, value, rel_line, rel_start, rel_end,
-                           _base=base_line, _base_offset=base_offset):
+        def relocated_sink(column: str, operator: str, value: str, rel_line: int,
+                           rel_start: int, rel_end: int,
+                           _base: int = base_line, _base_offset: int = base_offset) -> None:
             # SQL_COMMENTs can span physical lines; LINE_COMMENTs never do
             # (by construction), so rel_line is always 1 there.
             sink(column, operator, value, _base + (rel_line - 1), "Y",
@@ -104,9 +110,10 @@ def rescan_comments(all_tokens, columns, sink,
         # above -- composes correctly through arbitrarily many nesting
         # levels since each recursion level closes over its own base_line/
         # base_offset.
-        def nested_sink(column, operator, value, line_within_this_comment, _in_comment,
-                        start_within_this_comment, end_within_this_comment,
-                        _base=base_line, _base_offset=base_offset):
+        def nested_sink(column: str, operator: str, value: str,
+                        line_within_this_comment: int, _in_comment: str,
+                        start_within_this_comment: int, end_within_this_comment: int,
+                        _base: int = base_line, _base_offset: int = base_offset) -> None:
             sink(column, operator, value, _base + (line_within_this_comment - 1), "Y",
                 _base_offset + start_within_this_comment, _base_offset + end_within_this_comment)
 

@@ -65,10 +65,11 @@ class TestScanFileSafetyNets(unittest.TestCase):
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write("========================================\nSELECT * FROM t1;\n")
-            hits, suspects, refs, rel, sbc, fc, _qi, bad = scanner.scan_file(
+            result = scanner.scan_file(
                 path, scanner.DEFAULT_COLUMNS, set())
-            self.assertIsNotNone(bad)
-            self.assertEqual((hits, suspects, refs, rel, sbc, fc), ([], [], [], [], 0, []))
+            self.assertIsNotNone(result.bad_reason)
+            self.assertEqual((result.findings, result.name_candidates, result.select_block_count),
+                             ([], [], 0))
         finally:
             os.unlink(path)
 
@@ -78,12 +79,13 @@ class TestScanFileSafetyNets(unittest.TestCase):
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write("SELECT * FROM t1 WHERE ACCT_ID = '1';\n")
             with mock.patch("src.scan._scan_file_body", side_effect=RuntimeError("boom")):
-                hits, suspects, refs, rel, sbc, fc, _qi, bad = scanner.scan_file(
+                result = scanner.scan_file(
                     path, scanner.DEFAULT_COLUMNS, set())
-            self.assertIsNotNone(bad)
-            self.assertIn("RuntimeError", bad)
-            self.assertIn("boom", bad)
-            self.assertEqual((hits, suspects, refs, rel, sbc, fc), ([], [], [], [], 0, []))
+            self.assertIsNotNone(result.bad_reason)
+            self.assertIn("RuntimeError", result.bad_reason)
+            self.assertIn("boom", result.bad_reason)
+            self.assertEqual((result.findings, result.name_candidates, result.select_block_count),
+                             ([], [], 0))
         finally:
             os.unlink(path)
 
@@ -92,10 +94,10 @@ class TestScanFileSafetyNets(unittest.TestCase):
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write("SELECT * FROM t1 WHERE ACCT_ID = '1';\n")
-            hits, suspects, refs, rel, sbc, fc, _qi, bad = scanner.scan_file(
+            result = scanner.scan_file(
                 path, scanner.DEFAULT_COLUMNS, set())
-            self.assertIsNone(bad)
-            self.assertEqual(len(hits), 1)
+            self.assertIsNone(result.bad_reason)
+            self.assertEqual(len(result.findings), 1)
         finally:
             os.unlink(path)
 

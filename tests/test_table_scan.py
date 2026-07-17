@@ -20,7 +20,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import src  # noqa: E402  (bootstraps generated/ onto sys.path)
-from src.detect.statement_driver import lex_file, chunk_ranges  # noqa: E402
+from src.parsing.statement_driver import lex_file, chunk_ranges  # noqa: E402
 from src.references import table_scan as ts  # noqa: E402
 
 

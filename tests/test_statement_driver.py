@@ -18,7 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import src  # noqa: E402  (bootstraps generated/ onto sys.path)
 from src.detect.extractor_visitor import ExtractorVisitor  # noqa: E402
-from src.detect.statement_driver import parse_file  # noqa: E402
+from src.parsing.statement_driver import parse_file  # noqa: E402
 from src.detect.supplementary_checks import make_token_scan_fallback  # noqa: E402
 
 

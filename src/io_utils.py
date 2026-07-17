@@ -4,14 +4,17 @@ for every line-delimited artifact metchurial maintains across runs
 (bad_files.txt, stopwords.txt, known_names.txt).
 """
 
+from __future__ import annotations
+
 import os
 import sys
+from typing import Callable
 
 # Encodings to try when reading files (common on Windows / Korean environments).
 ENCODINGS = ["utf-8-sig", "utf-8", "cp949", "euc-kr", "latin-1"]
 
 
-def read_text(path):
+def read_text(path: str) -> tuple[str, str]:
     """Read a file's text, trying each of ENCODINGS in order and falling
     back to lossy UTF-8 decoding if none of them fit cleanly. Returns
     (text, encoding_used)."""
@@ -25,7 +28,7 @@ def read_text(path):
         return f.read(), "utf-8(replace)"
 
 
-def _for_each_line(path, handle_line):
+def _for_each_line(path: str, handle_line: Callable[[str], None]) -> None:
     """Call handle_line(line) for each line of `path`, trying ENCODINGS in
     order until one decodes the whole file cleanly. Lines decoded before a
     mid-file decode failure have already been handled; a file no encoding
@@ -40,7 +43,7 @@ def _for_each_line(path, handle_line):
             continue
 
 
-def load_bad_files(path):
+def load_bad_files(path: str) -> dict[str, str]:
     """Load a persistent bad_files.txt (see cli.py's skip-list workflow):
     one file path per line, with an optional trailing '# reason' comment
     (same convention as stopwords.txt below). Returns {abspath: reason}
@@ -52,7 +55,7 @@ def load_bad_files(path):
     if not path or not os.path.isfile(path):
         return entries
 
-    def add_entry(line):
+    def add_entry(line: str) -> None:
         if "#" in line:
             p, reason = line.split("#", 1)
             p, reason = p.strip(), reason.strip()
@@ -65,7 +68,7 @@ def load_bad_files(path):
     return entries
 
 
-def write_bad_files(path, entries):
+def write_bad_files(path: str, entries: dict[str, str]) -> None:
     """Writes bad_files.txt: one path per line, its reason as a trailing
     '#' comment, sorted for stable diffs across runs. `entries`:
     {path: reason}. Deleting a line lets that file be re-scanned on the
@@ -80,7 +83,7 @@ def write_bad_files(path, entries):
             f.write("{}  # {}\n".format(p, reason) if reason else "{}\n".format(p))
 
 
-def ensure_stopwords_template(path):
+def ensure_stopwords_template(path: str) -> None:
     """Write an empty stopwords.txt with a format-explaining header if one
     doesn't exist yet -- same self-maintaining convention as bad_files.txt
     (write_bad_files above), so a fresh checkout gets a stopwords.txt to
@@ -95,7 +98,7 @@ def ensure_stopwords_template(path):
                "See strings.txt for candidates to triage.\n")
 
 
-def _load_word_set(path, missing_label):
+def _load_word_set(path: str, missing_label: str) -> set[str]:
     """Load a word-per-line file ('#' comments allowed) into a set.
     Warns to stderr, naming the file as `missing_label`, when it's
     missing."""
@@ -106,7 +109,7 @@ def _load_word_set(path, missing_label):
         print("[WARN] {} file not found: {}".format(missing_label, path), file=sys.stderr)
         return words
 
-    def add_word(line):
+    def add_word(line: str) -> None:
         w = line.split("#", 1)[0].strip()
         if w:
             words.add(w)
@@ -115,12 +118,12 @@ def _load_word_set(path, missing_label):
     return words
 
 
-def load_stopwords(path):
+def load_stopwords(path: str) -> set[str]:
     """Load stopword file: one word per line, '#' comments allowed."""
     return _load_word_set(path, "stopword")
 
 
-def ensure_known_names_template(path):
+def ensure_known_names_template(path: str) -> None:
     """Write an empty known_names.txt with a format-explaining header if one
     doesn't exist yet -- same self-maintaining convention as stopwords.txt
     above."""
@@ -135,6 +138,6 @@ def ensure_known_names_template(path):
                "strings.txt for candidates to triage.\n")
 
 
-def load_known_names(path):
+def load_known_names(path: str) -> set[str]:
     """Load known-names file: one word per line, '#' comments allowed."""
     return _load_word_set(path, "known-names")

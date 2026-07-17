@@ -30,10 +30,16 @@ degenerate cross-join) goes unrecorded entirely -- a documented
 limitation, not a silent wrong answer.
 """
 
+from __future__ import annotations
+
+from typing import Any, Callable
+
 from Db2Parser import Db2Parser
 from Db2ParserVisitor import Db2ParserVisitor
 
-from src.predicates import COMPARISON_OPS, classify_predicate
+from src.models.relations import RelationEdge, RelationRollup
+from src.models.tables import JoinEdge, QueryBlock
+from src.parsing.predicates import COMPARISON_OPS, classify_predicate
 from src.references import table_scan
 from src.report import write_refs_tsv
 
@@ -45,18 +51,19 @@ class _JoinPredicateVisitor(Db2ParserVisitor):
     can never be told apart from two different tables) that resolve to
     two distinct real (non-placeholder) tables in the same query block."""
 
-    def __init__(self, query_blocks, sink):
+    def __init__(self, query_blocks: list[QueryBlock],
+                 sink: Callable[[str, str, str, str, str, str, int], None]) -> None:
         self.query_blocks = query_blocks
         self.sink = sink
 
-    def visitPredicate(self, ctx: Db2Parser.PredicateContext):
+    def visitPredicate(self, ctx: Db2Parser.PredicateContext) -> Any:
         op = classify_predicate(ctx)
         if op in COMPARISON_OPS:
             exprs = ctx.expression()
             self._handle_comparison(exprs[0], exprs[1], op, ctx.start.line)
         return self.visitChildren(ctx)
 
-    def _handle_comparison(self, left, right, operator, line):
+    def _handle_comparison(self, left: Any, right: Any, operator: str, line: int) -> None:
         lfref = left.field_reference()
         rfref = right.field_reference()
         if lfref is None or rfref is None:
@@ -75,61 +82,53 @@ class _JoinPredicateVisitor(Db2ParserVisitor):
         self.sink(lschema, ltable, rschema, rtable, "WHERE-IMPLICIT", predicate, line)
 
 
-def make_join_predicate_visitor(query_blocks, sink):
+def make_join_predicate_visitor(
+        query_blocks: list[QueryBlock],
+        sink: Callable[[str, str, str, str, str, str, int], None]) -> Db2ParserVisitor:
     """sink: callable(left_schema, left_table, right_schema, right_table,
     join_type, predicate, line) -- same shape edges are normalized to
     regardless of which of the two sources above produced them."""
     return _JoinPredicateVisitor(query_blocks, sink)
 
 
-def structural_edges_to_dicts(path, edges):
-    """edges: list[table_scan.JoinEdge] (table_scan.scan_join_edges'
-    output). Normalizes to the same flat edge-dict shape WHERE-IMPLICIT
-    edges use, so both sources merge into one list downstream."""
-    return [{
-        "file": path, "line": e.line,
-        "table_a_schema": e.left.schema, "table_a": e.left.table,
-        "table_b_schema": e.right.schema, "table_b": e.right.table,
-        "join_type": e.join_type, "predicate": e.predicate_text,
-    } for e in edges]
+def structural_edges_to_models(path: str, edges: list[JoinEdge]) -> list[RelationEdge]:
+    """edges: table_scan.scan_join_edges' output. Normalizes to the same
+    RelationEdge shape WHERE-IMPLICIT edges use, so both sources merge
+    into one list downstream."""
+    return [RelationEdge(
+        file=path, line=e.line,
+        table_a_schema=e.left.schema, table_a=e.left.table,
+        table_b_schema=e.right.schema, table_b=e.right.table,
+        join_type=e.join_type, predicate=e.predicate_text,
+    ) for e in edges]
 
 
-def aggregate_edges(edges):
-    """Groups by an unordered table-pair key (so A-B and B-A collapse
-    together) -- (schema, table) 2-tuples sorted so grouping is
-    deterministic regardless of which side happened to be "left"/"right"
-    in the source SQL. Returns a list of dicts: table_a_schema, table_a,
-    table_b_schema, table_b, join_count, predicates (sorted distinct
-    predicate strings seen for this pair), sorted by join_count desc then
+def aggregate_edges(edges: list[RelationEdge]) -> list[RelationRollup]:
+    """Groups by RelationEdge.pair_key() (unordered, so A-B and B-A
+    collapse together). Returns one RelationRollup per table pair with
+    its sorted distinct predicate strings, sorted by join_count desc then
     table names."""
-    groups = {}
+    groups: dict[tuple[tuple[str, str], tuple[str, str]], dict[str, Any]] = {}
     for e in edges:
-        a = (e["table_a_schema"], e["table_a"])
-        b = (e["table_b_schema"], e["table_b"])
-        key = tuple(sorted((a, b)))
-        g = groups.setdefault(key, {"count": 0, "predicates": set()})
+        g = groups.setdefault(e.pair_key(), {"count": 0, "predicates": set()})
         g["count"] += 1
-        if e["predicate"]:
-            g["predicates"].add(e["predicate"])
+        if e.predicate:
+            g["predicates"].add(e.predicate)
 
-    rows = []
-    for (a, b), g in groups.items():
-        rows.append({
-            "table_a_schema": a[0], "table_a": a[1],
-            "table_b_schema": b[0], "table_b": b[1],
-            "join_count": g["count"],
-            "predicates": sorted(g["predicates"]),
-        })
-    rows.sort(key=lambda r: (-r["join_count"], r["table_a"], r["table_b"]))
+    rows = [RelationRollup(
+        table_a_schema=a[0], table_a=a[1],
+        table_b_schema=b[0], table_b=b[1],
+        join_count=g["count"],
+        predicates=tuple(sorted(g["predicates"])),
+    ) for (a, b), g in groups.items()]
+    rows.sort(key=lambda r: (-r.join_count, r.table_a, r.table_b))
     return rows
 
 
-def write_relations_tsv(path, aggregated):
+def write_relations_tsv(path: str, aggregated: list[RelationRollup]) -> None:
     """Same TSV conventions as report.write_refs_tsv (utf-8-sig,
     tab-separated, header row always written even for an empty
     `aggregated` list); each row's distinct predicates are joined with
-    '; ' into one column."""
-    headers = ["table_a_schema", "table_a", "table_b_schema", "table_b",
-               "join_count", "predicates"]
-    rows = [dict(row, predicates="; ".join(row["predicates"])) for row in aggregated]
-    write_refs_tsv(path, headers, rows)
+    '; ' into one column by the writer's sequence-cell convention."""
+    write_refs_tsv(path, ["table_a_schema", "table_a", "table_b_schema", "table_b",
+                          "join_count", "predicates"], aggregated)
