@@ -26,7 +26,7 @@ def refs_for(text, extract_table_refs=True, extract_column_refs=True):
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(text)
-        _hits, _suspects, refs, _rel, _sbc, _fc, _bad = scanner.scan_file(
+        _hits, _suspects, refs, _rel, _sbc, _fc, _qi, _bad = scanner.scan_file(
             path, scanner.DEFAULT_COLUMNS, set(),
             extract_table_refs=extract_table_refs, extract_column_refs=extract_column_refs)
         return refs
@@ -73,7 +73,7 @@ class TestColumnRefs(unittest.TestCase):
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write("SELECT * FROM t1 a WHERE a.ACCT_ID = '0000001';")
-            hits, suspects, refs, _rel, _sbc, _fc, _bad = scanner.scan_file(
+            hits, suspects, refs, _rel, _sbc, _fc, _qi, _bad = scanner.scan_file(
                 path, scanner.DEFAULT_COLUMNS, set(),
                 extract_table_refs=True, extract_column_refs=True)
             self.assertEqual(len(hits), 1)

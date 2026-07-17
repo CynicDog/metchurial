@@ -53,6 +53,20 @@ class TestSchemaQualifiedNames(unittest.TestCase):
         blocks = _blocks_for("SELECT * FROM cat1.schema1.table1;")[0]
         self.assertEqual(_tables(blocks), [("SCHEMA1", "TABLE1", "TABLE1")])
 
+    def test_qualified_name_segment_that_collides_with_a_reserved_keyword(self):
+        # Regression guard for a real bug found while adding a DB2 system-
+        # catalog stress fixture: TABLES/COLUMNS/INDEXES are each their
+        # own reserved lexer token, not plain ID, so SYSCAT.TABLES/
+        # SYSCAT.COLUMNS/SYSCAT.INDEXES -- extremely common in real DB2
+        # code -- used to silently fail to consume the qualified part at
+        # all (same root cause class as the single-letter alias collision
+        # above, but in the schema-qualification path instead).
+        blocks = _blocks_for(
+            "SELECT t.tabname FROM syscat.tables t "
+            "INNER JOIN syscat.columns c ON t.tabname = c.tabname;")[0]
+        self.assertEqual(_tables(blocks),
+                         [("SYSCAT", "COLUMNS", "C"), ("SYSCAT", "TABLES", "T")])
+
 
 class TestJoinExtraction(unittest.TestCase):
     def test_explicit_join_on(self):
@@ -87,6 +101,25 @@ class TestJoinExtraction(unittest.TestCase):
         blocks = _blocks_for("SELECT * FROM t1 a JOIN t2 b ON a.x=b.y;")[0]
         tables = {t.table for qb in blocks for t in qb.tables}
         self.assertIn("T2", tables)
+
+    def test_hub_table_join_pairs_from_predicate_not_position(self):
+        # Regression guard for a real bug found while building
+        # query_identity.py: a JOIN's table pair used to be assigned
+        # purely by FROM-clause position (entries[k]/entries[k+1]), so a
+        # "hub table" pattern -- t3 really joins back to t1, not its
+        # immediate FROM-list predecessor t2 -- got mislabeled (t2, t3)
+        # even though its own predicate text (t1.y=t3.z) was always
+        # captured correctly. Must resolve to the real pair now.
+        blocks = _blocks_for(
+            "SELECT * FROM t1 a JOIN t2 b ON a.x=b.x JOIN t3 c ON a.y=c.z;")[0]
+        self.assertEqual(_edges(blocks), [("A", "B", "JOIN"), ("A", "C", "JOIN")])
+
+    def test_using_clause_falls_back_to_position(self):
+        # USING's bare column list has no qualifiers to resolve a real
+        # pair from -- must still fall back to position, not silently
+        # drop the edge.
+        blocks = _blocks_for("SELECT * FROM t1 a JOIN t2 b USING (id);")[0]
+        self.assertEqual(_edges(blocks), [("A", "B", "JOIN")])
 
 
 class TestCteExclusion(unittest.TestCase):
@@ -231,6 +264,67 @@ class TestScanTableListNeverLeaksNoneIndex(unittest.TestCase):
         from_idx = next(i for i, t in enumerate(all_tokens) if t.text.upper() == "T1")
         _entries, _connectors, next_index = ts._scan_table_list(all_tokens, from_idx, set())
         self.assertIsInstance(next_index, int)
+
+
+class TestReservedKeywordAliasCollision(unittest.TestCase):
+    """Db2Lexer.g4 reserves G/K/M/P/S as their own lexer tokens, not plain
+    ID -- extremely common real-world table aliases. Regression guard for
+    a real bug found while building query_identity.py: before this fix,
+    such an alias silently failed to resolve (alias came back as the
+    table name itself) and the entire connector loop aborted, losing the
+    JOIN's own predicate too, not just the alias."""
+
+    def test_p_alias_resolves_and_predicate_is_captured(self):
+        blocks = _blocks_for(
+            "SELECT * FROM t1 e LEFT OUTER JOIN t2 p ON e.x = p.y;")[0]
+        self.assertEqual(_tables(blocks),
+                         [(ts.PLACEHOLDER_SCHEMA, "T1", "E"), (ts.PLACEHOLDER_SCHEMA, "T2", "P")])
+        edge = ts.scan_join_edges(blocks)[0]
+        self.assertIn("e.x", edge.predicate_text)
+        self.assertIn("p.y", edge.predicate_text)
+
+    def test_every_colliding_letter_resolves_as_an_alias(self):
+        for letter in ("G", "K", "M", "P", "S"):
+            sql = "SELECT * FROM t1 {};".format(letter)
+            blocks = _blocks_for(sql)[0]
+            self.assertEqual(_tables(blocks), [(ts.PLACEHOLDER_SCHEMA, "T1", letter)], sql)
+
+
+class TestCteParticipatingJoinEdge(unittest.TestCase):
+    """Regression guard for a second real bug found while building
+    query_identity.py: an outer query's own JOIN to a CTE result was
+    silently dropped entirely (not just the CTE "table", the whole edge
+    and the CTE's own alias-map entry) since _scan_one_table_ref used to
+    return None for a CTE reference."""
+
+    def test_cte_alias_resolves_and_edge_is_captured(self):
+        sql = ("WITH cte AS (SELECT id FROM t1) "
+              "SELECT * FROM cte c JOIN t2 b ON c.id = b.id;")
+        blocks = _blocks_for(sql)[0]
+        outer = next(qb for qb in blocks if any(t.table == "T2" for t in qb.tables))
+        self.assertIn("C", outer.alias_map)
+        self.assertTrue(outer.alias_map["C"].is_cte)
+        edges = ts.scan_join_edges(blocks)
+        cte_edges = [e for e in edges if e.left.is_cte or e.right.is_cte]
+        self.assertEqual(len(cte_edges), 1)
+        self.assertIn("c.id", cte_edges[0].predicate_text)
+
+    def test_cte_name_still_excluded_from_real_tables_despite_join(self):
+        sql = ("WITH cte AS (SELECT id FROM t1) "
+              "SELECT * FROM cte c JOIN t2 b ON c.id = b.id;")
+        blocks = _blocks_for(sql)[0]
+        tables = {t.table for qb in blocks for t in qb.tables}
+        self.assertEqual(tables, {"T1", "T2"})
+        self.assertNotIn("CTE", tables)
+
+    def test_resolve_qualifier_excludes_cte_by_default(self):
+        sql = "WITH cte AS (SELECT id FROM t1) SELECT c.id FROM cte c;"
+        blocks = _blocks_for(sql)[0]
+        idx = sql.index("c.id")
+        self.assertEqual(ts.resolve_qualifier(blocks, idx, "C"),
+                         (ts.PLACEHOLDER_SCHEMA, ts.PLACEHOLDER_TABLE))
+        self.assertEqual(ts.resolve_qualifier(blocks, idx, "C", include_cte=True),
+                         (ts.PLACEHOLDER_SCHEMA, "CTE"))
 
 
 class TestExtractTableRefsOnly(unittest.TestCase):

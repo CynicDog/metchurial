@@ -41,7 +41,7 @@ class TestAnsiJoinChain(unittest.TestCase):
     path for any of these beyond the first table."""
 
     def test_hit_still_found_inside_a_join_heavy_statement(self):
-        hits, suspects, _refs, _rel, _sbc, _fc, bad = _scan("17_ansi_join_chain.sql")
+        hits, suspects, _refs, _rel, _sbc, _fc, _qi, bad = _scan("17_ansi_join_chain.sql")
         self.assertIsNone(bad)
         self.assertEqual(suspects, [])
         self.assertEqual(len(hits), 1)
@@ -49,13 +49,13 @@ class TestAnsiJoinChain(unittest.TestCase):
         self.assertEqual(hits[0]["value"], "'1234567'")
 
     def test_every_joined_table_is_discovered(self):
-        _hits, _suspects, refs, _rel, _sbc, _fc, _bad = _scan(
+        _hits, _suspects, refs, _rel, _sbc, _fc, _qi, _bad = _scan(
             "17_ansi_join_chain.sql", extract_table_refs=True)
         tables = {r["table"] for r in refs if r["kind"] == "table"}
         self.assertEqual(tables, {"TBACCT", "TBCTRT", "TBSTAT", "TBSAMPLE001", "TBCODE"})
 
     def test_join_edges_for_inner_outer_and_cross_all_recorded(self):
-        _hits, _suspects, _refs, rel, _sbc, _fc, _bad = _scan(
+        _hits, _suspects, _refs, rel, _sbc, _fc, _qi, _bad = _scan(
             "17_ansi_join_chain.sql", extract_relations=True)
         join_types = sorted(edge["join_type"] for edge in rel)
         self.assertEqual(join_types, ["CROSS", "INNER", "JOIN", "LEFT"])
@@ -69,7 +69,7 @@ class TestCteWithAnsiJoin(unittest.TestCase):
     either."""
 
     def test_hit_found_and_cte_name_excluded_from_real_tables(self):
-        hits, suspects, refs, _rel, _sbc, _fc, bad = _scan(
+        hits, suspects, refs, _rel, _sbc, _fc, _qi, bad = _scan(
             "18_cte_with_ansi_join.sql", extract_table_refs=True)
         self.assertIsNone(bad)
         self.assertEqual(suspects, [])
@@ -94,14 +94,14 @@ class TestZeroArgumentFunctionFixture(unittest.TestCase):
     arg_list gave zero-arg calls no parse path at all."""
 
     def test_hit_found_alongside_zero_arg_calls(self):
-        hits, suspects, _refs, _rel, _sbc, _fc, bad = _scan("19_zero_argument_functions.sql")
+        hits, suspects, _refs, _rel, _sbc, _fc, _qi, bad = _scan("19_zero_argument_functions.sql")
         self.assertIsNone(bad)
         self.assertEqual(suspects, [])
         self.assertEqual(len(hits), 1)
         self.assertEqual(hits[0]["value"], "'1112223'")
 
     def test_both_now_calls_captured(self):
-        _hits, _suspects, _refs, _rel, _sbc, fc, _bad = _scan(
+        _hits, _suspects, _refs, _rel, _sbc, fc, _qi, _bad = _scan(
             "19_zero_argument_functions.sql", extract_functions=True)
         now_calls = [f for f in fc if f["function"] == "NOW"]
         self.assertEqual(len(now_calls), 2)

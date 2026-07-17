@@ -34,13 +34,41 @@ parse-tree gap:
    since they walk the tree itself rather than re-scanning tokens.
 
 CTE names are excluded from the tables this module records (`WITH cte AS
-(...) SELECT * FROM cte` must not report `cte` as a real table). A
-*separate*, now-fixed issue -- a CTE's body SELECT used to get
+(...) SELECT * FROM cte` must not report `cte` as a real table) -- but a
+CTE reference still becomes a real `TableRef` (flagged `is_cte=True`), not
+`None`: it needs to resolve via `alias_map` (a later `cte_alias.col` must
+resolve to *something*) and still participate in a `join_connectors` edge
+when an outer query joins to it (`FROM cte_a JOIN cte_b ON ...`) -- a gap
+where such edges were silently dropped entirely, fixed alongside
+query_identity.py, which is the first consumer that needs full join
+topology across CTE scopes. `iter_table_refs`/refs_tables.tsv and
+refs_relations.tsv (see scan.py's pre_chunk_hook) both continue to exclude
+`is_cte` refs, preserving their existing output exactly.
+
+A *separate*, now-fixed issue -- a CTE's body SELECT used to get
 independently re-surfaced by the tiered driver as if it were its own
 standalone top-level statement (also issue #4 / commit 7fea4c8) -- used to
 matter to --split-selects' chunk classification (select_blocks.py); see
 that module's docstring for how it's unaffected either way.
+
+A JOIN connector's table *pair* (as opposed to its predicate text, which
+was always captured correctly) used to be assigned purely by FROM-clause
+*position* (entries[k]/entries[k+1]) rather than from what its own
+ON-clause predicate actually says -- wrong for a "hub table" pattern
+(`FROM a JOIN b ON a.x=b.x JOIN c ON a.y=c.y`, where `c` really joins to
+`a`, not `b`, its immediate FROM-list predecessor). Found and fixed
+alongside query_identity.py, which is the first consumer that needed
+edge pairing to be reliably correct rather than merely a good-enough
+proxy: `_resolve_pair_from_predicate` now derives the real pair from the
+predicate's own qualifiers, resolved via this block's own alias_map, and
+falls back to position only when the predicate doesn't unambiguously
+name exactly two known aliases (a comma-join with no predicate at all, or
+a USING clause's bare unqualified column list). This also directly
+improves refs_relations.tsv's already-shipped output for this pattern,
+not just query_identity.py.
 """
+
+import re
 
 from antlr4.Token import Token
 
@@ -48,6 +76,27 @@ from Db2Lexer import Db2Lexer
 
 PLACEHOLDER_SCHEMA = "(no-schema)"
 PLACEHOLDER_TABLE = "(no-table)"
+
+_QUALIFIER_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\.")
+
+# Tokens that can never be the next segment of a dotted schema/catalog-
+# qualified name -- everything else immediately after a '.' in a table-
+# reference position is treated as an identifier-like segment (see
+# _looks_like_name_segment), not just plain ID. Real DB2 system catalog
+# views collide with reserved keywords constantly and there's no way to
+# whitelist them all individually (SYSCAT.TABLES, SYSCAT.COLUMNS,
+# SYSCAT.INDEXES -- TABLES/COLUMNS/INDEXES are each their own lexer
+# token, not ID) -- this is the structural signal (position right after
+# a '.') doing the work instead of a keyword list.
+_NOT_A_NAME_SEGMENT = {
+    Db2Lexer.COMMA, Db2Lexer.LEFT_RND_BKT, Db2Lexer.RIGHT_RND_BKT, Db2Lexer.SEMI,
+    Db2Lexer.WHERE, Db2Lexer.ON, Db2Lexer.USING, Db2Lexer.AS, Db2Lexer.DOT,
+    Db2Lexer.JOIN, Db2Lexer.INNER, Db2Lexer.LEFT, Db2Lexer.RIGHT, Db2Lexer.FULL, Db2Lexer.CROSS,
+}
+
+
+def _looks_like_name_segment(token):
+    return token.type not in _NOT_A_NAME_SEGMENT
 
 _JOIN_QUALIFIER_TYPES = {
     Db2Lexer.INNER: "INNER",
@@ -57,15 +106,35 @@ _JOIN_QUALIFIER_TYPES = {
     Db2Lexer.CROSS: "CROSS",
 }
 
+# Db2Lexer.g4 reserves a handful of single letters as their own lexer
+# tokens rather than plain ID (G/K/M/P/S -- confirmed against the grammar
+# directly) -- extremely common real-world table aliases. The real ANTLR
+# parser tree can't accept one as a correlation_name either (verified
+# empirically: a real grammar limitation, same root cause as issue #1's
+# already-documented "reserved-keyword-colliding alias" item, out of scope
+# to fix at the grammar level here) -- but this module's token-scan is
+# independent of the parser and doesn't need to wait on that: accepting
+# these tokens as aliases here, alongside plain ID, keeps table/alias/JOIN
+# discovery correct for this extremely common pattern regardless.
+_ALIAS_TOKEN_TYPES = {Db2Lexer.ID, Db2Lexer.G, Db2Lexer.K, Db2Lexer.M, Db2Lexer.P_, Db2Lexer.S_}
+
 
 class TableRef(object):
-    def __init__(self, schema, table, alias, line, start_char, stop_char):
+    def __init__(self, schema, table, alias, line, start_char, stop_char, is_cte=False):
         self.schema = schema
         self.table = table
         self.alias = alias
         self.line = line
         self.start_char = start_char
         self.stop_char = stop_char
+        # True for a reference to a CTE name rather than a real schema
+        # object -- still resolvable via alias_map (a later `cte_alias.col`
+        # must resolve to *something*) but excluded from `.tables`/
+        # iter_table_refs's real-table set, and from refs_relations.tsv's
+        # existing output (see scan.py's pre_chunk_hook) -- only
+        # query_identity.py's signature-building consumes CTE-participating
+        # join edges, deliberately.
+        self.is_cte = is_cte
 
 
 class QueryBlock(object):
@@ -86,7 +155,12 @@ class QueryBlock(object):
         self.join_connectors = []
 
     def add_table(self, ref):
-        self.tables.append(ref)
+        # A CTE reference still needs to be resolvable via alias_map (a
+        # later `cte_alias.col` must resolve to *something*), but must
+        # never appear in `.tables` -- that's the "CTE names excluded from
+        # real tables" contract iter_table_refs/refs_tables.tsv depend on.
+        if not ref.is_cte:
+            self.tables.append(ref)
         self.alias_map[ref.alias] = ref
         # DB2 allows using the real table name as its own qualifier even
         # when an explicit alias is also given -- but an explicit alias
@@ -277,7 +351,7 @@ def _scan_one_table_ref(tokens, i, cte_names, by_start=None):
         j = _skip_hidden(tokens, close_idx, n)
         if j is not None and tokens[j].type == Db2Lexer.AS:
             j = _skip_hidden(tokens, j + 1, n)
-        if j is not None and tokens[j].type == Db2Lexer.ID:
+        if j is not None and tokens[j].type in _ALIAS_TOKEN_TYPES:
             j += 1
         return None, (j if j is not None else n)
     if tok.type != Db2Lexer.ID:
@@ -290,14 +364,14 @@ def _scan_one_table_ref(tokens, i, cte_names, by_start=None):
     j = _skip_hidden(tokens, i + 1, n)
     if j is not None and tokens[j].type == Db2Lexer.DOT:
         j2 = _skip_hidden(tokens, j + 1, n)
-        if j2 is not None and tokens[j2].type == Db2Lexer.ID:
+        if j2 is not None and _looks_like_name_segment(tokens[j2]):
             schema, table = part1, tokens[j2].text.upper()
             stop_char = tokens[j2].stop
             j = j2 + 1
             j3 = _skip_hidden(tokens, j, n)
             if j3 is not None and tokens[j3].type == Db2Lexer.DOT:
                 j4 = _skip_hidden(tokens, j3 + 1, n)
-                if j4 is not None and tokens[j4].type == Db2Lexer.ID:
+                if j4 is not None and _looks_like_name_segment(tokens[j4]):
                     # 3-part catalog.schema.table -- what was tentatively
                     # "table" (the 2nd part) is really the schema; catalog
                     # (part1) is dropped, documented limitation.
@@ -313,18 +387,21 @@ def _scan_one_table_ref(tokens, i, cte_names, by_start=None):
     k = _skip_hidden(tokens, j, n)
     if k is not None and tokens[k].type == Db2Lexer.AS:
         k2 = _skip_hidden(tokens, k + 1, n)
-        if k2 is not None and tokens[k2].type == Db2Lexer.ID:
+        if k2 is not None and tokens[k2].type in _ALIAS_TOKEN_TYPES:
             alias = tokens[k2].text.upper()
             j = k2 + 1
         else:
             j = k + 1
-    elif k is not None and tokens[k].type == Db2Lexer.ID:
+    elif k is not None and tokens[k].type in _ALIAS_TOKEN_TYPES:
         alias = tokens[k].text.upper()
         j = k + 1
 
-    if is_cte:
-        return None, j
-    return TableRef(schema, table, alias, line, start_char, stop_char), j
+    # A CTE reference still becomes a real TableRef (needed so its alias
+    # resolves via alias_map and so it can still participate in a
+    # join_connectors edge -- see QueryBlock.add_table) but is flagged
+    # is_cte so it's excluded from `.tables`/iter_table_refs's real-table
+    # set and from refs_relations.tsv's existing output.
+    return TableRef(schema, table, alias, line, start_char, stop_char, is_cte=is_cte), j
 
 
 def _scan_table_list(tokens, from_index, cte_names, by_start=None):
@@ -385,14 +462,41 @@ def _scan_table_list(tokens, from_index, cte_names, by_start=None):
     return entries, connectors, i
 
 
+def _resolve_pair_from_predicate(predicate_text, alias_map):
+    """Best-effort: if predicate_text (a connector's own captured ON/USING
+    text) unambiguously names exactly two distinct known aliases (e.g.
+    `a.x = b.y`), returns their real TableRefs in first-appearance order
+    -- correct regardless of this connector's own position in the
+    FROM-clause list, unlike the positional entries[k]/entries[k+1]
+    fallback below (confirmed wrong for a "hub table" pattern: `FROM a
+    JOIN b ON a.x=b.x JOIN c ON a.y=c.y` -- the second JOIN really
+    connects to `a`, not `b`, but position alone can't know that).
+    Returns None (caller falls back to positional) when the predicate
+    doesn't resolve to exactly two distinct known aliases: a comma-join
+    with no predicate at all, a USING clause's bare unqualified column
+    list, or an ON-clause naming more than two tables (rare, ambiguous --
+    safer to fall back than to guess)."""
+    if not predicate_text:
+        return None
+    seen = []
+    for m in _QUALIFIER_RE.finditer(predicate_text):
+        ref = alias_map.get(m.group(1).upper())
+        if ref is not None and ref not in seen:
+            seen.append(ref)
+    if len(seen) == 2:
+        return seen[0], seen[1]
+    return None
+
+
 def _apply_table_list(qb, entries, connectors):
     for e in entries:
         if e is not None:
             qb.add_table(e)
     for k in range(len(connectors)):
-        left, right = entries[k], entries[k + 1]
+        join_type, predicate = connectors[k]
+        pair = _resolve_pair_from_predicate(predicate, qb.alias_map)
+        left, right = pair if pair is not None else (entries[k], entries[k + 1])
         if left is not None and right is not None:
-            join_type, predicate = connectors[k]
             qb.join_connectors.append((left, right, join_type, predicate))
 
 
@@ -543,11 +647,21 @@ def scan_join_edges(query_blocks):
     return edges
 
 
-def resolve_qualifier(query_blocks, char_offset, qualifier):
+def resolve_qualifier(query_blocks, char_offset, qualifier, include_cte=False):
     """qualifier: upper-cased alias text (a field_reference's
     row_variable_name), or None for a bare, unqualified column_name.
     Finds the innermost (smallest enclosing [start_char, stop_char)) block
     containing char_offset and resolves qualifier against its alias_map.
+
+    `include_cte`: False (default, matches every existing caller's
+    behavior unchanged -- relations.py, reference_visitor.py) treats a
+    CTE alias the same as unresolvable (PLACEHOLDER_SCHEMA/TABLE), since
+    a CTE is not a real schema object; those callers' own outputs
+    (refs_columns.tsv, refs_relations.tsv's WHERE-IMPLICIT sourcing)
+    continue to only ever report real tables. query_identity.py passes
+    True: for its structural-signature purposes, an outer query's join to
+    a CTE result *is* meaningful topology (see table_scan.py's module
+    docstring) -- resolves to (PLACEHOLDER_SCHEMA, cte_name) instead.
     Uses character offsets, not token indices -- token indices get
     reassigned per-CommonTokenStream/ListTokenSource, but Token.start/.stop
     character offsets never change once the lexer sets them (verified in
@@ -571,6 +685,8 @@ def resolve_qualifier(query_blocks, char_offset, qualifier):
         return PLACEHOLDER_SCHEMA, PLACEHOLDER_TABLE
     ref = best[1].alias_map.get(qualifier.upper())
     if ref is None:
+        return PLACEHOLDER_SCHEMA, PLACEHOLDER_TABLE
+    if ref.is_cte and not include_cte:
         return PLACEHOLDER_SCHEMA, PLACEHOLDER_TABLE
     return ref.schema, ref.table
 

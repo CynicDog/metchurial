@@ -260,6 +260,32 @@ def _write_relations(out, relations_summary):
     out.write("\n")
 
 
+def _write_query_identity(out, query_identity_rows, query_similarity_rows):
+    out.write("## Query Identity\n\n")
+    if not query_identity_rows:
+        out.write("No statements identified.\n\n")
+        return
+    clusters = {}
+    for row in query_identity_rows:
+        clusters.setdefault(row["core_id"], []).append(row)
+    ranked = sorted(clusters.items(), key=lambda kv: (-len(kv[1]), kv[0]))
+    out.write("{} statement(s) across {} distinct core_id(s). Top clusters by size below "
+              "-- full list in refs_query_identity.tsv, pairwise similarity scores for "
+              "statements that don't share a core_id in refs_query_similarity.tsv.\n\n".format(
+                  len(query_identity_rows), len(clusters)))
+    out.write("| core_id | Members | Example |\n|---|---:|---|\n")
+    for core_id, rows in ranked[:MAX_GROUPED_VALUES]:
+        example = "{}:{}".format(rows[0]["file"], rows[0]["line"])
+        out.write("| `{}` | {} | `{}` |\n".format(md_escape(core_id), len(rows), md_escape(example)))
+    if len(ranked) > MAX_GROUPED_VALUES:
+        out.write("\n_...+{} more core_id(s), see refs_query_identity.tsv._\n".format(
+            len(ranked) - MAX_GROUPED_VALUES))
+    out.write("\n")
+    if query_similarity_rows:
+        out.write("{} core_id pair(s) scored as similar but not identical -- see "
+                  "refs_query_similarity.tsv for the full list.\n\n".format(len(query_similarity_rows)))
+
+
 def _write_select_blocks(out, select_block_counts):
     out.write("## Select Blocks\n\n")
     nonzero = {f: c for f, c in select_block_counts.items() if c > 0}
@@ -276,18 +302,20 @@ def write_markdown_report(path, run_info, hits, name_candidates, previously_bad,
                           stopwords_count, stopwords_freshly_created,
                           known_names_count, known_names_freshly_created,
                           refs=None, function_calls=None,
-                          relations_summary=None, select_block_counts=None):
+                          relations_summary=None, select_block_counts=None,
+                          query_identity_rows=None, query_similarity_rows=None):
     """Writes summary.md, a fixed-size index into every artifact a scan
     produces (not a duplicate of any of them). Sections are written in
     order: run info, Sensitive Findings (with per-file detail subsections),
     String Occurrences, Bad Files, Stopwords, Known Names, then the opt-in
-    sections -- Table & Column References / Functions / Relations, gated
-    by `refs`/`function_calls`/`relations_summary` being non-None (i.e.
-    --extract-metadata); Select Blocks, gated by `select_block_counts`
-    being non-None (i.e. --split-selects). A gated section is omitted
-    entirely rather than rendered empty when its flag is off; a clean scan
-    can still have JOIN relationships or bad files worth reporting, so
-    those sections are independent of whether any finding was found.
+    sections -- Table & Column References / Functions / Relations / Query
+    Identity, gated by `refs`/`function_calls`/`relations_summary`/
+    `query_identity_rows` being non-None (i.e. --extract-metadata); Select
+    Blocks, gated by `select_block_counts` being non-None (i.e.
+    --split-selects). A gated section is omitted entirely rather than
+    rendered empty when its flag is off; a clean scan can still have JOIN
+    relationships or bad files worth reporting, so those sections are
+    independent of whether any finding was found.
     `run_info`: {invocation, root, file_count, sensitive_columns,
     extensions, workers, max_chunk_iterations, extract_metadata,
     split_selects, mask_literals, verbose}."""
@@ -304,6 +332,8 @@ def write_markdown_report(path, run_info, hits, name_candidates, previously_bad,
             _write_functions(out, function_calls)
         if relations_summary is not None:
             _write_relations(out, relations_summary)
+        if query_identity_rows is not None:
+            _write_query_identity(out, query_identity_rows, query_similarity_rows)
         if select_block_counts is not None:
             _write_select_blocks(out, select_block_counts)
 

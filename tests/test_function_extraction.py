@@ -29,7 +29,7 @@ def function_calls_for(text):
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(text)
-        _hits, _suspects, _refs, _rel, _sbc, fc, _bad = scanner.scan_file(
+        _hits, _suspects, _refs, _rel, _sbc, fc, _qi, _bad = scanner.scan_file(
             path, scanner.DEFAULT_COLUMNS, set(), extract_functions=True)
         return fc
     finally:
@@ -70,7 +70,7 @@ class TestBasicExtraction(unittest.TestCase):
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write("SELECT SUBSTR(cust_nm, 1, 3) FROM t1;")
-            _hits, _suspects, _refs, _rel, _sbc, fc, _bad = scanner.scan_file(
+            _hits, _suspects, _refs, _rel, _sbc, fc, _qi, _bad = scanner.scan_file(
                 path, scanner.DEFAULT_COLUMNS, set())
             self.assertEqual(fc, [])
         finally:
@@ -176,7 +176,7 @@ class TestPredicateExtraction(unittest.TestCase):
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write("SELECT * FROM t1 WHERE ACCT_ID = '123';")
-            _hits, _suspects, _refs, _rel, _sbc, fc, _bad = scanner.scan_file(
+            _hits, _suspects, _refs, _rel, _sbc, fc, _qi, _bad = scanner.scan_file(
                 path, scanner.DEFAULT_COLUMNS, set())
             self.assertEqual(fc, [])
         finally:

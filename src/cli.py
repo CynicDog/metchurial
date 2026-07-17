@@ -10,6 +10,7 @@ import os
 import shlex
 import sys
 
+from src.references import query_identity as query_identity_module
 from src.references import relations as relations_module
 from src.io_utils import (ensure_known_names_template, ensure_stopwords_template, load_bad_files,
                           load_known_names, load_stopwords, write_bad_files)
@@ -42,6 +43,8 @@ REFS_TABLES_PATH = "refs_tables.tsv"
 REFS_COLUMNS_PATH = "refs_columns.tsv"
 FUNCTIONS_PATH = "refs_functions.tsv"
 RELATIONS_PATH = "refs_relations.tsv"
+QUERY_IDENTITY_PATH = "refs_query_identity.tsv"
+QUERY_SIMILARITY_PATH = "refs_query_similarity.tsv"
 
 
 def main(argv=None):
@@ -82,8 +85,12 @@ def main(argv=None):
     ap.add_argument("--extract-metadata", action="store_true",
                     help="Emit refs_tables.tsv/refs_columns.tsv (every schema.table and "
                         "schema.table.column reference found), refs_relations.tsv (table-to-table "
-                        "JOIN usage -- comma-joins and explicit JOIN...ON/USING alike), and "
+                        "JOIN usage -- comma-joins and explicit JOIN...ON/USING alike), "
                         "refs_functions.tsv (every function call and predicate operator found), "
+                        "and refs_query_identity.tsv/refs_query_similarity.tsv (a core_id per "
+                        "statement -- structurally identical statements share one id regardless "
+                        "of column aliasing/projection/derived-column-calculation differences -- "
+                        "plus a similarity score between statements that don't share one), "
                         "plus matching sections in summary.md (default: off; see README's "
                         "Known Limitations for the JOIN/CTE-related resolution gaps)")
     ap.add_argument("--split-selects", action="store_true",
@@ -133,17 +140,20 @@ def main(argv=None):
                       REFS_TABLES_PATH if args.extract_metadata else None,
                       REFS_COLUMNS_PATH if args.extract_metadata else None,
                       FUNCTIONS_PATH if args.extract_metadata else None,
-                      RELATIONS_PATH if args.extract_metadata else None) if p}
+                      RELATIONS_PATH if args.extract_metadata else None,
+                      QUERY_IDENTITY_PATH if args.extract_metadata else None,
+                      QUERY_SIMILARITY_PATH if args.extract_metadata else None) if p}
     exclude_paths |= set(previously_bad)
 
-    hits, name_candidates, refs, relation_edges, select_block_counts, function_calls, new_bad, file_count = scan_tree(
+    (hits, name_candidates, refs, relation_edges, select_block_counts, function_calls,
+     new_bad, query_identity_rows, file_count) = scan_tree(
         args.root, args.sensitive_columns, stopwords, known_names,
         extensions=args.extensions, exclude_paths=exclude_paths,
         max_iterations_per_chunk=args.max_chunk_iterations,
         verbose=args.verbose, workers=args.workers,
         extract_table_refs=args.extract_metadata, extract_column_refs=args.extract_metadata,
         extract_relations=args.extract_metadata, split_select=args.split_selects,
-        extract_functions=args.extract_metadata)
+        extract_functions=args.extract_metadata, extract_query_identity=args.extract_metadata)
 
     # Preserve skipped (still-unfixed) entries from previous runs, and add
     # anything newly flagged this run -- a file the user removed from
@@ -155,6 +165,11 @@ def main(argv=None):
 
     relations_summary = (relations_module.aggregate_edges(relation_edges)
                          if args.extract_metadata else None)
+    # Corpus-wide, single post-aggregation pass (not per-file/per-worker):
+    # needs every core_id discovered across the whole scan to be
+    # meaningful (see query_identity.py's module docstring).
+    query_similarity_rows = (query_identity_module.compute_similarity(query_identity_rows)
+                             if args.extract_metadata else None)
 
     invocation = "metchurial " + " ".join(
         shlex.quote(a) for a in (argv if argv is not None else sys.argv[1:]))
@@ -172,7 +187,9 @@ def main(argv=None):
         refs=refs if args.extract_metadata else None,
         function_calls=function_calls if args.extract_metadata else None,
         relations_summary=relations_summary,
-        select_block_counts=select_block_counts if args.split_selects else None)
+        select_block_counts=select_block_counts if args.split_selects else None,
+        query_identity_rows=query_identity_rows if args.extract_metadata else None,
+        query_similarity_rows=query_similarity_rows)
 
     all_findings = hits
     write_tsv_report(FINDINGS_PATH, all_findings)
@@ -198,6 +215,12 @@ def main(argv=None):
 
         relations_module.write_relations_tsv(RELATIONS_PATH, relations_summary)
 
+        identity_rows = sorted(query_identity_rows, key=lambda r: (r["core_id"], r["file"], r["line"]))
+        write_refs_tsv(QUERY_IDENTITY_PATH,
+                      ["core_id", "file", "line", "table_count", "join_count", "predicate_count"],
+                      identity_rows)
+        query_identity_module.write_similarity_tsv(QUERY_SIMILARITY_PATH, query_similarity_rows)
+
     print("Scanned {} file(s) (.{}). Findings: {}".format(
         file_count, ", .".join(args.extensions), len(hits)))
     print("Summary        : {}".format(os.path.abspath(SUMMARY_PATH)))
@@ -213,6 +236,10 @@ def main(argv=None):
         print("Column refs    : {}".format(os.path.abspath(REFS_COLUMNS_PATH)))
         print("Functions      : {}".format(os.path.abspath(FUNCTIONS_PATH)))
         print("Relations      : {}".format(os.path.abspath(RELATIONS_PATH)))
+        print("Query identity : {} ({} statement(s), {} distinct core_id(s))".format(
+            os.path.abspath(QUERY_IDENTITY_PATH), len(query_identity_rows),
+            len({r["core_id"] for r in query_identity_rows})))
+        print("Query similarity: {}".format(os.path.abspath(QUERY_SIMILARITY_PATH)))
     if args.split_selects:
         print("Select blocks  : {} standalone SELECT block(s) across {} file(s), "
              "split files written alongside originals for files with 2+ blocks".format(

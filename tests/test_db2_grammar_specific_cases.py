@@ -36,7 +36,7 @@ def scan_text(content, columns=None):
         f.write(content)
         path = f.name
     try:
-        hits, suspects, _refs, _rel, _sbc, _fc, _bad = scan_file(path, columns, set())
+        hits, suspects, _refs, _rel, _sbc, _fc, _qi, _bad = scan_file(path, columns, set())
         return hits, suspects
     finally:
         os.unlink(path)

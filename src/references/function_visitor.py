@@ -13,7 +13,7 @@ file, line):
    common keyword predicates (IN/NOT IN, BETWEEN/NOT BETWEEN, LIKE/NOT
    LIKE, IS [NOT] NULL). `predicate` is a single grammar rule with many
    alternatives sharing one flat generated context class (no per-
-   alternative subclasses), so `_classify_predicate` inspects which
+   alternative subclasses), so `classify_predicate` inspects which
    optional accessor is actually populated to tell them apart -- see it
    for the disambiguation details (e.g. `IN()`/`NOT()` are shared with
    the rare `... IN NOT? DISTINCT FROM ...` and cursor `IN NOT? (FOUND |
@@ -64,10 +64,13 @@ def _slice(text, ctx):
     return text[ctx.start.start:ctx.stop.stop + 1]
 
 
-def _classify_predicate(ctx):
+def classify_predicate(ctx):
     """Returns an operator name string for the predicate alternatives this
     visitor supports, or None for anything else (see module docstring's
-    Known Limitation 4)."""
+    Known Limitation 4). Public: also reused by query_identity.py's
+    _PredicateFactVisitor for the same shape-classification, kept here
+    rather than duplicated since it only inspects `ctx`, no dependency on
+    this module's own text-slicing convention."""
     exprs = ctx.expression()
     op_ctx = ctx.comparison_operator()
     if op_ctx is not None and len(exprs) == 2 and ctx.some_any_all() is None:
@@ -132,7 +135,7 @@ class FunctionVisitor(Db2ParserVisitor):
         return self.visitChildren(ctx)
 
     def visitPredicate(self, ctx: Db2Parser.PredicateContext):
-        op = _classify_predicate(ctx)
+        op = classify_predicate(ctx)
         if op is not None:
             params = ", ".join(_predicate_operands(self.text, ctx, op))
             self.sink(op, params, ctx.start.line)

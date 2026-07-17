@@ -26,7 +26,7 @@ from src.detect.statement_driver import chunk_ranges, lex_file  # noqa: E402
 
 def scan(filename, stopwords=None, known_names=None):
     path = os.path.join(FIXTURES_DIR, filename)
-    hits, name_candidates, _refs, _rel, _sbc, _fc, _bad = scanner.scan_file(
+    hits, name_candidates, _refs, _rel, _sbc, _fc, _qi, _bad = scanner.scan_file(
         path, scanner.DEFAULT_COLUMNS, stopwords or set(), known_names or set())
     return hits, name_candidates
 
@@ -39,7 +39,7 @@ def scan_text(text, stopwords=None, known_names=None):
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(text)
-        hits, name_candidates, _refs, _rel, _sbc, _fc, _bad = scanner.scan_file(
+        hits, name_candidates, _refs, _rel, _sbc, _fc, _qi, _bad = scanner.scan_file(
             path, scanner.DEFAULT_COLUMNS, stopwords or set(), known_names or set())
         return hits, name_candidates
     finally:
@@ -304,7 +304,7 @@ class TestComplexRealWorldQuery(unittest.TestCase):
         # tests/test_select_blocks.py; this test reads the classification
         # read-only instead so it stays independent of that).
         path = os.path.join(FIXTURES_DIR, "14_complex_multi_cte_query.sql")
-        hits, name_candidates, refs, _rel, _sbc, _fc, _bad = scanner.scan_file(
+        hits, name_candidates, refs, _rel, _sbc, _fc, _qi, _bad = scanner.scan_file(
             path, scanner.DEFAULT_COLUMNS, set(), extract_table_refs=True)
         tables = {r["table"] for r in refs if r["kind"] == "table"}
         self.assertEqual(tables, {"T1", "T2", "T_REF", "T_MAP", "T_CODE",
@@ -323,22 +323,22 @@ class TestComplexRealWorldQuery(unittest.TestCase):
 
 class TestTxtExtension(unittest.TestCase):
     def test_txt_included_by_default(self):
-        hits, name_candidates, refs, rel, sbc, fc, bad, file_count = scanner.scan_tree(
+        hits, name_candidates, refs, rel, sbc, fc, bad, _qi, file_count = scanner.scan_tree(
             FIXTURES_DIR, scanner.DEFAULT_COLUMNS, set())
-        self.assertEqual(file_count, 19)  # 18 .sql + 1 .txt fixture
+        self.assertEqual(file_count, 38)  # 37 .sql + 1 .txt fixture
         self.assertTrue(any(h["value"] == "'0000070'" for h in hits))
 
     def test_sql_only_when_requested(self):
-        hits, name_candidates, refs, rel, sbc, fc, bad, file_count = scanner.scan_tree(
+        hits, name_candidates, refs, rel, sbc, fc, bad, _qi, file_count = scanner.scan_tree(
             FIXTURES_DIR, scanner.DEFAULT_COLUMNS, set(), extensions=["sql"])
-        self.assertEqual(file_count, 18)
+        self.assertEqual(file_count, 37)
         self.assertFalse(any(h["value"] == "'0000070'" for h in hits))
 
     def test_exclude_paths_skips_own_output_files(self):
         excluded = {os.path.abspath(os.path.join(FIXTURES_DIR, "07_from_txt_export.txt"))}
-        hits, name_candidates, refs, rel, sbc, fc, bad, file_count = scanner.scan_tree(
+        hits, name_candidates, refs, rel, sbc, fc, bad, _qi, file_count = scanner.scan_tree(
             FIXTURES_DIR, scanner.DEFAULT_COLUMNS, set(), exclude_paths=excluded)
-        self.assertEqual(file_count, 18)
+        self.assertEqual(file_count, 37)
         self.assertFalse(any(h["value"] == "'0000070'" for h in hits))
 
 
@@ -369,7 +369,7 @@ class TestMaskingEndToEnd(unittest.TestCase):
         shutil.rmtree(self.d)
 
     def test_masking_pipeline(self):
-        hits, name_candidates, _refs, _rel, _sbc, _fc, _bad = scanner.scan_file(
+        hits, name_candidates, _refs, _rel, _sbc, _fc, _qi, _bad = scanner.scan_file(
             self.path, scanner.DEFAULT_COLUMNS, set(), self.KNOWN_NAMES)
         self.assertEqual(len(hits), 15)
         self.assertEqual(name_candidates, [])
@@ -400,13 +400,13 @@ class TestMaskingEndToEnd(unittest.TestCase):
         # shapes (column/operator against a literal -- the placeholder is
         # still a literal), and re-masking must be a no-op: '****'/'0000'
         # simply mask to themselves.
-        hits, _name_candidates, _refs, _rel, _sbc, _fc, _bad = scanner.scan_file(
+        hits, _name_candidates, _refs, _rel, _sbc, _fc, _qi, _bad = scanner.scan_file(
             self.path, scanner.DEFAULT_COLUMNS, set(), self.KNOWN_NAMES)
         mask.write_masked_files(hits)
         with open(self.path, encoding="utf-8") as f:
             once = f.read()
 
-        hits2, _name_candidates2, _refs, _rel, _sbc, _fc, _bad = scanner.scan_file(
+        hits2, _name_candidates2, _refs, _rel, _sbc, _fc, _qi, _bad = scanner.scan_file(
             self.path, scanner.DEFAULT_COLUMNS, set(), self.KNOWN_NAMES)
         mask.write_masked_files(hits2)
         with open(self.path, encoding="utf-8") as f:
@@ -433,7 +433,7 @@ class TestSplitOutputNeverRescannedAsInput(unittest.TestCase):
         shutil.rmtree(self.d)
 
     def test_split_output_excluded_from_file_count_and_hits(self):
-        hits, name_candidates, refs, rel, sbc, fc, bad, file_count = scanner.scan_tree(
+        hits, name_candidates, refs, rel, sbc, fc, bad, _qi, file_count = scanner.scan_tree(
             self.d, scanner.DEFAULT_COLUMNS, set())
         self.assertEqual(file_count, 1)
         self.assertEqual(len(hits), 1)

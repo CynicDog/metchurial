@@ -65,7 +65,7 @@ class TestScanFileSafetyNets(unittest.TestCase):
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write("========================================\nSELECT * FROM t1;\n")
-            hits, suspects, refs, rel, sbc, fc, bad = scanner.scan_file(
+            hits, suspects, refs, rel, sbc, fc, _qi, bad = scanner.scan_file(
                 path, scanner.DEFAULT_COLUMNS, set())
             self.assertIsNotNone(bad)
             self.assertEqual((hits, suspects, refs, rel, sbc, fc), ([], [], [], [], 0, []))
@@ -78,7 +78,7 @@ class TestScanFileSafetyNets(unittest.TestCase):
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write("SELECT * FROM t1 WHERE ACCT_ID = '1';\n")
             with mock.patch("src.scan._scan_file_body", side_effect=RuntimeError("boom")):
-                hits, suspects, refs, rel, sbc, fc, bad = scanner.scan_file(
+                hits, suspects, refs, rel, sbc, fc, _qi, bad = scanner.scan_file(
                     path, scanner.DEFAULT_COLUMNS, set())
             self.assertIsNotNone(bad)
             self.assertIn("RuntimeError", bad)
@@ -92,7 +92,7 @@ class TestScanFileSafetyNets(unittest.TestCase):
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write("SELECT * FROM t1 WHERE ACCT_ID = '1';\n")
-            hits, suspects, refs, rel, sbc, fc, bad = scanner.scan_file(
+            hits, suspects, refs, rel, sbc, fc, _qi, bad = scanner.scan_file(
                 path, scanner.DEFAULT_COLUMNS, set())
             self.assertIsNone(bad)
             self.assertEqual(len(hits), 1)

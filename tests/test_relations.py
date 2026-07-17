@@ -30,7 +30,7 @@ def relation_edges_for(text):
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(text)
-        _hits, _suspects, _refs, rel, _sbc, _fc, _bad = scanner.scan_file(
+        _hits, _suspects, _refs, rel, _sbc, _fc, _qi, _bad = scanner.scan_file(
             path, scanner.DEFAULT_COLUMNS, set(), extract_relations=True)
         return rel
     finally:
