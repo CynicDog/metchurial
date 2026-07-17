@@ -1,0 +1,366 @@
+# -*- coding: utf-8 -*-
+"""Writes every report artifact a scan produces (summary.md, findings.tsv,
+strings.txt, refs_*.tsv) from the finding dicts (severity/file/line/
+column_name/operator/value/snippet/encoding/in_comment) scan.py produces.
+
+summary.md is an index into the other artifacts, not a duplicate of them:
+every section beyond "Sensitive Hits" is a bounded count-plus-top-N view
+with a pointer to the full artifact file (strings.txt, bad_files.txt,
+stopwords.txt, known_names.txt, refs_*.tsv), so its size stays
+fixed regardless of how large the scan is.
+"""
+
+import datetime
+import os
+
+# Cap on how many literals get joined into one Markdown "Value(s)" cell
+# (e.g. a large IN(...) list) before switching to "...(+N more)" -- an
+# unbounded join can produce a single cell thousands of characters wide,
+# which most Markdown viewers wrap so badly it looks like a broken table.
+MAX_GROUPED_VALUES = 10
+
+# Per-file cap on rows in the "## Sensitive Hits" detail subsections --
+# full, uncapped detail is always in findings.tsv.
+DETAIL_CAP = 15
+
+
+def md_escape(text):
+    """Escape/normalize text for a Markdown table cell. A literal can
+    legally contain an embedded newline (a quoted string spanning physical
+    lines); left as-is that breaks the table row, so whitespace is
+    collapsed to single spaces the same way the TSV writer does."""
+    text = str(text).replace("\r", " ").replace("\n", " ").replace("\t", " ")
+    return text.replace("|", "\\|").replace("`", "'")
+
+
+def _format_grouped_values(values):
+    """Join grouped literals for one Markdown cell, capped at
+    MAX_GROUPED_VALUES so a large IN(...)/repeated-comparison list (which
+    the .tsv already reports one-row-per-literal, uncapped) can't blow up
+    a single cell to thousands of characters."""
+    if len(values) > MAX_GROUPED_VALUES:
+        shown = values[:MAX_GROUPED_VALUES]
+        return "{}; ... (+{} more, see findings.tsv)".format(
+            "; ".join(shown), len(values) - MAX_GROUPED_VALUES)
+    return "; ".join(values)
+
+
+def _group_for_detail(items):
+    """Collapse findings that share file/line/column/operator into one row
+    with their values joined -- keeps an IN(...)/BETWEEN explosion (which
+    the .tsv reports one-row-per-literal, by design) from also exploding
+    the Markdown detail table row-for-row."""
+    groups = {}
+    order = []
+    for f in items:
+        key = (f["line"], f["column_name"], f["operator"])
+        if key not in groups:
+            groups[key] = {"values": [], "snippet": f["snippet"]}
+            order.append(key)
+        groups[key]["values"].append(f["value"])
+    rows = []
+    for key in order:
+        line, column, operator = key
+        g = groups[key]
+        rows.append({
+            "line": line, "column_name": column, "operator": operator,
+            "value": _format_grouped_values(g["values"]), "snippet": g["snippet"],
+        })
+    rows.sort(key=lambda r: r["line"])
+    return rows
+
+
+def _name_candidate_counts(name_candidates):
+    """{name-shaped literal: occurrence count} across all not-yet-classified
+    candidates -- shared by write_strings_file and the "## String
+    Occurrences" summary section so the two never drift apart."""
+    counts = {}
+    for word in name_candidates:
+        counts[word] = counts.get(word, 0) + 1
+    return counts
+
+
+def _ranked_counts(items, key):
+    """{key(item): count}, sorted by count desc then key asc -- shared
+    ranking helper for the Table/Column References and Functions summary
+    sections."""
+    counts = {}
+    for item in items:
+        k = key(item)
+        counts[k] = counts.get(k, 0) + 1
+    return sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+
+
+def _write_run_info(out, run_info):
+    out.write("# Scan Summary\n\n")
+    out.write("| Item | Value |\n|---|---|\n")
+    out.write("| Run at | {} |\n".format(
+        datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+    out.write("| Command | `{}` |\n".format(md_escape(run_info["invocation"])))
+    out.write("| Scan root | `{}` |\n".format(os.path.abspath(run_info["root"])))
+    out.write("| Files scanned | {} |\n".format(run_info["file_count"]))
+    out.write("| Sensitive columns | {} |\n".format(
+        ", ".join("`{}`".format(c.upper()) for c in run_info["sensitive_columns"])))
+    out.write("| Extensions | {} |\n".format(
+        ", ".join("`.{}`".format(e) for e in run_info["extensions"])))
+    out.write("| Workers | {} |\n".format(run_info["workers"]))
+    out.write("| Max chunk iterations | {} |\n".format(run_info["max_chunk_iterations"]))
+    out.write("| Extract metadata | {} |\n".format("ON" if run_info["extract_metadata"] else "OFF"))
+    out.write("| Split selects | {} |\n".format("ON" if run_info["split_selects"] else "OFF"))
+    out.write("| Mask literals | {} |\n".format("ON" if run_info["mask_literals"] else "OFF"))
+    out.write("| Verbose | {} |\n\n".format("ON" if run_info["verbose"] else "OFF"))
+
+
+def _write_sensitive_hits(out, hits):
+    by_file = {}
+    for f in hits:
+        by_file.setdefault(f["file"], []).append(f)
+
+    out.write("## Sensitive Hits\n\n")
+    if not by_file:
+        out.write("No hardcoded sensitive values detected. ✅\n\n")
+        return
+
+    out.write("| # | File | Findings |\n")
+    out.write("|---:|---|---:|\n")
+    for i, fpath in enumerate(sorted(by_file), start=1):
+        out.write("| {} | `{}` | {} |\n".format(i, md_escape(fpath), len(by_file[fpath])))
+    out.write("| | **Total** | **{}** |\n\n".format(len(hits)))
+
+    out.write("_Rows sharing the same file/line/column/operator are "
+              "collapsed into one row with values joined by `; `. Each file is "
+              "capped at {} rows below; see findings.tsv for the full, uncapped "
+              "list._\n".format(DETAIL_CAP))
+    for fpath in sorted(by_file):
+        all_items = by_file[fpath]
+        grouped = _group_for_detail(all_items)
+        out.write("\n### `{}` — {} finding(s), {} row(s) below\n\n".format(
+            md_escape(fpath), len(all_items), min(len(grouped), DETAIL_CAP)))
+        out.write("| Line | Column | Operator | Value(s) | Snippet |\n")
+        out.write("|---:|---|---|---|---|\n")
+        for row in grouped[:DETAIL_CAP]:
+            out.write("| {} | {} | `{}` | `{}` | `{}` |\n".format(
+                row["line"], row["column_name"],
+                md_escape(row["operator"]), md_escape(row["value"]),
+                md_escape(row["snippet"])))
+        remaining = len(grouped) - DETAIL_CAP
+        if remaining > 0:
+            out.write("\n_...+{} more row(s) for this file, see findings.tsv._\n".format(remaining))
+    out.write("\n")
+
+
+def _write_string_occurrences(out, name_candidates):
+    out.write("## String Occurrences\n\n")
+    counts = _name_candidate_counts(name_candidates)
+    if not counts:
+        out.write("No unclassified name-like literals -- nothing left to triage.\n\n")
+        return
+    ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    out.write("{} unique name-like literal(s) not yet classified, {} occurrence(s) total. "
+              "Full list in strings.txt -- copy a real name into known_names.txt to flag "
+              "it as HIT on the next run, or a non-name into stopwords.txt to stop seeing "
+              "it here.\n\n".format(len(counts), sum(counts.values())))
+    out.write("| Literal | Occurrences |\n|---|---:|\n")
+    for word, count in ranked[:MAX_GROUPED_VALUES]:
+        out.write("| `{}` | {} |\n".format(md_escape(word), count))
+    if len(ranked) > MAX_GROUPED_VALUES:
+        out.write("\n_...+{} more, see strings.txt._\n".format(len(ranked) - MAX_GROUPED_VALUES))
+    out.write("\n")
+
+
+def _write_bad_files(out, previously_bad, new_bad):
+    out.write("## Bad Files\n\n")
+    all_bad = dict(previously_bad)
+    all_bad.update(new_bad)
+    if not all_bad:
+        out.write("No bad files skipped or flagged.\n\n")
+        return
+    out.write("{} skipped (already in bad_files.txt), {} newly flagged this run. "
+              "Full list in bad_files.txt.\n\n".format(len(previously_bad), len(new_bad)))
+    out.write("| File | Reason | Newly flagged |\n|---|---|---|\n")
+    for fpath in sorted(all_bad)[:MAX_GROUPED_VALUES]:
+        out.write("| `{}` | {} | {} |\n".format(
+            md_escape(fpath), md_escape(all_bad[fpath]), "Y" if fpath in new_bad else "N"))
+    if len(all_bad) > MAX_GROUPED_VALUES:
+        out.write("\n_...+{} more, see bad_files.txt._\n".format(len(all_bad) - MAX_GROUPED_VALUES))
+    out.write("\n")
+
+
+def _write_stopwords(out, stopwords_count, freshly_created):
+    out.write("## Stopwords\n\n")
+    if freshly_created:
+        out.write("stopwords.txt didn't exist yet -- created an empty template this run. "
+                  "0 stopword(s) loaded.\n\n")
+    else:
+        out.write("{} stopword(s) loaded from stopwords.txt.\n\n".format(stopwords_count))
+
+
+def _write_known_names(out, known_names_count, freshly_created):
+    out.write("## Known Names\n\n")
+    if freshly_created:
+        out.write("known_names.txt didn't exist yet -- created an empty template this run. "
+                  "0 known name(s) loaded.\n\n")
+    else:
+        out.write("{} known name(s) loaded from known_names.txt.\n\n".format(known_names_count))
+
+
+def _write_references(out, refs):
+    out.write("## Table & Column References\n\n")
+    table_refs = [r for r in refs if r["kind"] == "table"]
+    column_refs = [r for r in refs if r["kind"] == "column"]
+    if not table_refs and not column_refs:
+        out.write("No table/column references detected.\n\n")
+        return
+    out.write("{} table reference(s), {} column reference(s). Full detail in "
+              "refs_tables.tsv / refs_columns.tsv.\n\n".format(len(table_refs), len(column_refs)))
+    ranked = _ranked_counts(refs, key=lambda r: "{}.{}".format(r["schema"], r["table"]))
+    out.write("| Table | References |\n|---|---:|\n")
+    for name, count in ranked[:MAX_GROUPED_VALUES]:
+        out.write("| `{}` | {} |\n".format(md_escape(name), count))
+    if len(ranked) > MAX_GROUPED_VALUES:
+        out.write("\n_...+{} more table(s), see refs_tables.tsv._\n".format(
+            len(ranked) - MAX_GROUPED_VALUES))
+    out.write("\n")
+
+
+def _write_functions(out, function_calls):
+    out.write("## Functions\n\n")
+    if not function_calls:
+        out.write("No function calls detected.\n\n")
+        return
+    ranked = _ranked_counts(function_calls, key=lambda r: r["function"])
+    out.write("{} function call(s) found. Full detail in refs_functions.tsv.\n\n".format(
+        len(function_calls)))
+    out.write("| Function | Calls |\n|---|---:|\n")
+    for name, count in ranked[:MAX_GROUPED_VALUES]:
+        out.write("| `{}` | {} |\n".format(md_escape(name), count))
+    if len(ranked) > MAX_GROUPED_VALUES:
+        out.write("\n_...+{} more, see refs_functions.tsv._\n".format(len(ranked) - MAX_GROUPED_VALUES))
+    out.write("\n")
+
+
+def _write_relations(out, relations_summary):
+    out.write("## Relations\n\n")
+    if not relations_summary:
+        out.write("No JOIN relationships detected.\n\n")
+        return
+    out.write("_Top table-to-table relationships across the whole scan; full list "
+              "in refs_relations.tsv._\n\n")
+    out.write("| Table A | Table B | Join Count | Predicates |\n")
+    out.write("|---|---|---:|---|\n")
+    for row in relations_summary[:MAX_GROUPED_VALUES]:
+        a = "{}.{}".format(row["table_a_schema"], row["table_a"])
+        b = "{}.{}".format(row["table_b_schema"], row["table_b"])
+        preds = _format_grouped_values(row["predicates"]) if row["predicates"] else ""
+        out.write("| `{}` | `{}` | {} | `{}` |\n".format(
+            md_escape(a), md_escape(b), row["join_count"], md_escape(preds)))
+    if len(relations_summary) > MAX_GROUPED_VALUES:
+        out.write("\n_...+{} more table-pair(s), see refs_relations.tsv._\n".format(
+            len(relations_summary) - MAX_GROUPED_VALUES))
+    out.write("\n")
+
+
+def _write_select_blocks(out, select_block_counts):
+    out.write("## Select Blocks\n\n")
+    nonzero = {f: c for f, c in select_block_counts.items() if c > 0}
+    if not nonzero:
+        out.write("No standalone SELECT blocks detected.\n\n")
+        return
+    out.write("| File | SELECT Blocks |\n|---|---:|\n")
+    for fpath in sorted(nonzero):
+        out.write("| `{}` | {} |\n".format(md_escape(fpath), nonzero[fpath]))
+    out.write("| **Total** | **{}** |\n\n".format(sum(nonzero.values())))
+
+
+def write_markdown_report(path, run_info, hits, name_candidates, previously_bad, new_bad,
+                          stopwords_count, stopwords_freshly_created,
+                          known_names_count, known_names_freshly_created,
+                          refs=None, function_calls=None,
+                          relations_summary=None, select_block_counts=None):
+    """Writes summary.md, a fixed-size index into every artifact a scan
+    produces (not a duplicate of any of them). Sections are written in
+    order: run info, Sensitive Hits (with per-file detail subsections),
+    String Occurrences, Bad Files, Stopwords, Known Names, then the opt-in
+    sections -- Table & Column References / Functions / Relations, gated
+    by `refs`/`function_calls`/`relations_summary` being non-None (i.e.
+    --extract-metadata); Select Blocks, gated by `select_block_counts`
+    being non-None (i.e. --split-selects). A gated section is omitted
+    entirely rather than rendered empty when its flag is off; a clean scan
+    can still have JOIN relationships or bad files worth reporting, so
+    those sections are independent of whether any HIT was found.
+    `run_info`: {invocation, root, file_count, sensitive_columns,
+    extensions, workers, max_chunk_iterations, extract_metadata,
+    split_selects, mask_literals, verbose}."""
+    with open(path, "w", encoding="utf-8-sig") as out:
+        _write_run_info(out, run_info)
+        _write_sensitive_hits(out, hits)
+        _write_string_occurrences(out, name_candidates)
+        _write_bad_files(out, previously_bad, new_bad)
+        _write_stopwords(out, stopwords_count, stopwords_freshly_created)
+        _write_known_names(out, known_names_count, known_names_freshly_created)
+        if refs is not None:
+            _write_references(out, refs)
+        if function_calls is not None:
+            _write_functions(out, function_calls)
+        if relations_summary is not None:
+            _write_relations(out, relations_summary)
+        if select_block_counts is not None:
+            _write_select_blocks(out, select_block_counts)
+
+
+def write_strings_file(path, name_candidates):
+    """Write all unique name-like literals not yet classified into either
+    known_names.txt or stopwords.txt (live code and comments alike, since
+    comment-context examples still need triage), one per line, in the same
+    format as stopwords.txt/known_names.txt so lines can be copied directly
+    into either. Occurrence count is added as a '#' comment."""
+    counts = _name_candidate_counts(name_candidates)
+
+    with open(path, "w", encoding="utf-8-sig") as out:
+        out.write("# Unique unclassified name-like literal(s) found in this scan: {}\n".format(
+            len(counts)))
+        out.write("# Copy a REAL name into known_names.txt to flag it as a HIT on the next run.\n")
+        out.write("# Copy a NON-name (false positive) into stopwords.txt to stop seeing it here.\n")
+        out.write("# (format is compatible with both: word per line, '#' comment allowed)\n\n")
+        # most frequent first: frequent words are most likely business terms
+        for word in sorted(counts, key=lambda w: (-counts[w], w)):
+            out.write("{}   # {} occurrence(s)\n".format(word, counts[word]))
+
+
+def write_refs_tsv(path, headers, rows):
+    """Generic TSV writer for the --extract-metadata artifacts
+    (refs_tables.tsv, refs_columns.tsv, refs_functions.tsv), same
+    conventions as write_tsv_report (utf-8-sig, tab-separated, header row
+    always written even for an empty `rows` list, clean() stripping
+    embedded tabs/newlines that would otherwise break a TSV column).
+    `rows` is a list of dicts; only the keys named in `headers` are
+    written, in that order -- generic over each file's differing column
+    set (refs_tables.tsv has no "column" field, refs_columns.tsv does)."""
+    def clean(v):
+        return str(v).replace("\t", " ").replace("\r", " ").replace("\n", " ")
+
+    with open(path, "w", encoding="utf-8-sig", newline="") as out:
+        out.write("\t".join(headers) + "\n")
+        for row in rows:
+            out.write("\t".join(clean(row[h]) for h in headers) + "\n")
+
+
+def write_tsv_report(path, findings):
+    """Tab-separated report for pasting/filtering in Excel.
+    Directory and file name are separate columns for easy filtering, and
+    in_comment (Y/N) lets you filter live vs. commented-out findings
+    independently of severity."""
+    headers = ["severity", "in_comment", "directory", "file_name", "line",
+               "column_name", "operator", "value", "snippet"]
+
+    def clean(v):
+        # tabs/newlines inside a field would break TSV columns
+        return str(v).replace("\t", " ").replace("\r", " ").replace("\n", " ")
+
+    with open(path, "w", encoding="utf-8-sig", newline="") as out:
+        out.write("\t".join(headers) + "\n")
+        for f in findings:
+            directory, file_name = os.path.split(f["file"])
+            row = [f["severity"], f["in_comment"], directory, file_name, f["line"],
+                   f["column_name"], f["operator"], f["value"], f["snippet"]]
+            out.write("\t".join(clean(v) for v in row) + "\n")

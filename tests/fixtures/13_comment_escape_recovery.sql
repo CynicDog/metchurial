@@ -1,0 +1,6 @@
+--                   -- and ctrt_no in ('0000099'
+SELECT ACCT_ID
+FROM CUSTOMER
+WHERE ACCT_ID = '0000050'
+)
+SELECT * FROM CUSTOMER WHERE ACCT_ID = '0000100';
