@@ -55,8 +55,10 @@ def main(argv=None):
     print(BANNER)
 
     ap = argparse.ArgumentParser(
-        description="Detect hardcoded sensitive values (IDs, policy numbers, Korean names) "
-                    "in .sql (and, by default, .txt) files.")
+        description="Parse DB2 SQL into structured metadata (table/column/function/"
+                    "predicate references, JOIN relationships) and detect hardcoded "
+                    "sensitive values (IDs, policy numbers, Korean names), in .sql "
+                    "(and, by default, .txt) files.")
     ap.add_argument("root", help="Root directory to scan recursively")
     ap.add_argument("--sensitive-columns", nargs="+", default=DEFAULT_COLUMNS,
                     help="Sensitive column names (default: %(default)s)")

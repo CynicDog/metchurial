@@ -6,8 +6,9 @@ Walks two kinds of node in the parsed tree, both feeding the same
 refs_functions.tsv (function/operator name, its operands' raw source text,
 file, line):
 
-1. `function_invocation` (`function_name '(' all_distinct? arg_list ')'`)
-   -- ordinary function calls like SUBSTR(...)/UPPER(...).
+1. `function_invocation` (`function_name '(' all_distinct? arg_list? ')'`)
+   -- ordinary function calls like SUBSTR(...)/UPPER(...) and zero-argument
+   calls like NOW().
 2. `predicate` -- comparison operators (=, <>, <, >, <=, >=) and the
    common keyword predicates (IN/NOT IN, BETWEEN/NOT BETWEEN, LIKE/NOT
    LIKE, IS [NOT] NULL). `predicate` is a single grammar rule with many
@@ -27,7 +28,8 @@ subquery, or SUBSTR(UPPER(col1), 1, 3)) each get their own row, since
 visitChildren keeps walking into every subtree.
 
 Known limitations, all consequences of the vendored grammar rather than
-this visitor:
+this visitor (a zero-argument call like `NOW()` used to be one too --
+**fixed** in issue #4 / commit 7fea4c8, which made `arg_list` optional):
 
 1. COUNT, MAX, and LOWER are reserved keywords in vendor/grammars-v4's
    Db2Parser.g4 -- distinct lexer tokens, not the plain `ID` that
@@ -42,13 +44,9 @@ this visitor:
    schema-qualified table names elsewhere in this tool (see
    table_scan.py's module docstring) -- `function_name` is always a
    single unqualified identifier, so the schema-qualifier and the dot
-   aren't consumed by function_invocation at all.
-3. A zero-argument call (`NOW()`, `CURRENT_TIMESTAMP()`) also fails to
-   parse via function_invocation -- confirmed empirically -- since its
-   `arg_list` is mandatory in the grammar (`function_name '(' all_distinct?
-   arg_list ')'`, not `arg_list?`), and `arg_list : argument (',' argument)*`
-   requires at least one argument.
-4. Only the common predicate forms above are captured. EXISTS,
+   aren't consumed by function_invocation at all. Still open, tracked in
+   issue #1.
+3. Only the common predicate forms above are captured. EXISTS,
    ARRAY_EXISTS, JSON_EXISTS, REGEXP_LIKE, OVERLAPS, `IS [NOT] (TRUE |
    FALSE)`, `IS [NOT] DISTINCT FROM`, cursor `IN (FOUND | OPEN)`, and the
    dynamic-type-check predicates are deliberately out of scope -- rare in

@@ -4,16 +4,20 @@
 A "select block" is one semicolon-delimited top-level chunk (reusing
 statement_driver.chunk_ranges()'s existing top-level-';'-at-paren-depth-0
 splitting) that starts with (an optional `WITH <cte-list>` prologue, then)
-SELECT. This sidesteps a related, separate grammar bug entirely rather
-than trying to patch it: a CTE's own body SELECT gets independently
-re-surfaced by the tiered parsing driver as if it were its own standalone
-top-level statement (see table_scan.py's module docstring for the full
-story) -- but the CTE prologue and the SELECT that consumes it are already
-the same chunk by construction, so nothing needs to be teased apart here.
-Classification is a cheap, purely token-level pass with no parser
+SELECT. Classification is a cheap, purely token-level pass with no parser
 involvement at all, mirroring table_scan.find_cte_names' own WITH-list
 walk (paren-depth tracking), just checking what follows instead of
 collecting names.
+
+This token-level approach originally sidestepped a related grammar bug
+entirely rather than patching it: a CTE's own body SELECT used to get
+independently re-surfaced by the tiered parsing driver as if it were its
+own standalone top-level statement (see table_scan.py's module docstring;
+**fixed** in issue #4 / commit 7fea4c8). The CTE prologue and the SELECT
+that consumes it were already the same chunk by construction regardless of
+that bug, so this module's chunk-level classification needed no change
+when the grammar was fixed -- it was never depending on the tree parsing
+correctly in the first place.
 """
 
 import os

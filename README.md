@@ -1,19 +1,23 @@
 # metchurial
 
-A static-analysis toolkit for DB2 SQL files, built on a real parse tree —
-not regex — using [`antlr/grammars-v4`](https://github.com/antlr/grammars-v4)'s
-`sql/db2` grammar, a purpose-built IBM Db2 LUW SQL grammar, via ANTLR4. It
-detects hardcoded sensitive values (customer IDs, policy numbers, Korean
-person names), extracts schema/table/column/relation/function metadata,
-splits multi-statement files into one file per SELECT block, and masks
-flagged literals in place.
+An ANTLR-backed static analysis engine for DB2 SQL: it parses SQL source
+into a real syntax tree — not regex — using
+[`antlr/grammars-v4`](https://github.com/antlr/grammars-v4)'s `sql/db2`
+grammar, a purpose-built IBM Db2 LUW SQL grammar, and turns that tree into
+structured, queryable metadata: every table, column, function, and
+predicate reference a file makes, and the JOIN relationships between
+tables, aggregated across an entire codebase. Legacy enterprise SQL is
+itself a dataset worth analyzing systematically, not just code to review
+file by file — that's what this toolkit is for. Hardcoded-sensitive-value
+detection, SELECT-block splitting, and literal masking are all built on
+that same parse tree, as specific analyses layered on top of it.
 
 ## Capabilities
 
 | Capability | Flag | Details |
 |---|---|---|
-| **Detection** — sensitive-column comparisons and known-name literals | *(default, always on)* | [What it detects](#what-it-detects) |
-| **Metadata extraction** — table/column/function/predicate refs, JOIN relations | `--extract-metadata` | [Output artifacts](#output-artifacts) |
+| **Metadata extraction** — every table/column/function/predicate reference, JOIN relationships aggregated across the whole scan | `--extract-metadata` | [What it extracts](#what-it-extracts) |
+| **Sensitive-value detection** — sensitive-column comparisons and known-name literals | *(default, always on)* | [What it detects](#what-it-detects) |
 | **File splitting** — one file per standalone SELECT block | `--split-selects` | [Output artifacts](#output-artifacts) |
 | **Literal masking** — rewrite flagged literals to fixed placeholders in place | `--mask-literals` | [Output artifacts](#output-artifacts) |
 
@@ -87,9 +91,38 @@ state, so results are unaffected other than which order they're merged in
 couple of cores free for the OS/other work rather than setting `--workers`
 to your full core count.
 
+## What it extracts
+
+`--extract-metadata` walks the same parse tree detection uses, but
+unconditionally — every reference in the file, not just ones compared to a
+literal — and resolves each one back to the table/schema it actually
+belongs to:
+
+- **Table & schema references** — every `schema.table` a file's SQL
+  touches. Each query block gets its own alias map, so a bare `t1` or
+  `t1.col` resolves back to the schema-qualified table it actually refers
+  to, not just the identifier as written on that line.
+- **Column references** — every `schema.table.column` reference in the
+  file, not only ones inside a comparison; a correlated subquery's own
+  `t.col` is resolved within its own scope, not leaked into its parent's.
+- **Function & predicate usage** — every function call (`SUBSTR`,
+  `COALESCE`, `SUM`, ...) and predicate operator (`=`, `IN`, `BETWEEN`,
+  `LIKE`, `IS NULL`, ...) actually used, with the exact source text of its
+  arguments/operands.
+- **JOIN relationships** — every table-to-table JOIN edge, aggregated
+  across the *entire scan* (one graph, not one per file) — how tables in a
+  legacy schema actually connect in practice, not what an ER diagram
+  claims they should.
+
+Each of these lands in its own `refs_*.tsv` — see
+[Output artifacts](#output-artifacts) — built to be loaded straight into a
+spreadsheet or a graph tool.
+
 ## What it detects
 
-Detection is two independent mechanisms, both always on, each producing its
+Sensitive-value detection is one specific analysis built on the same parse
+tree metadata extraction uses — always on, independent of
+`--extract-metadata`. It's two independent mechanisms, each producing its
 own finding:
 
 - **Sensitive-Column Comparison Detection — FINDING**: a sensitive column

@@ -51,6 +51,31 @@ restricted environment.
   here per the file actually having changed, not as a formality --
   `tests/test_grammar_smoke.py`'s `TestFetchRowLimiting` pins down both
   forms parsing identically.
+
+  A second, larger round of modifications (issue #4, commit `7fea4c8`)
+  fixed three real parse-path gaps rather than adding a variant form:
+
+  1. `table_reference` gained ANSI `JOIN ... ON`/`USING` and `CROSS JOIN`
+     alternatives, merged in as *direct* left recursion (ANTLR4 rejects
+     the original `joined_table` rule's shape as mutually left-recursive
+     with `table_reference`, which is almost certainly why its only
+     reference site had been commented out rather than fixed). The
+     now-redundant standalone `joined_table` rule was removed.
+  2. `common_table_expression`'s body, previously self-referential
+     (`(WITH common_table_expression)? ')'`, no way for a CTE's own SELECT
+     to ever enter the tree), now points at
+     `(WITH common_table_expression_list)? fullselect`, the same shape
+     already used by `select_statement` and every other CTE-consuming rule
+     in this grammar.
+  3. `function_invocation`'s `arg_list` became optional
+     (`arg_list?` instead of `arg_list`), so zero-argument calls like
+     `NOW()` now have a parse path.
+
+  All three were previously tracked as accepted, worked-around limitations
+  (issues #1/#2); see CynicDog/metchurial#4 for the full investigation and
+  antlr/grammars-v4#4936 for the upstream PR against the source grammar.
+  `tests/test_grammar_fix_regression.py` pins all three down end-to-end
+  through the actual scan pipeline, not just at the grammar-rule level.
 - **Why this grammar over the previously-used Oracle PL/SQL grammar**:
   this project originally used `sql/plsql` (Oracle's grammar) as a
   stand-in, on the mistaken belief that no maintained DB2 grammar existed

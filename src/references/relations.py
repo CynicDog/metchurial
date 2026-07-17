@@ -6,23 +6,27 @@ directory).
 Two sources of join edges feed into this:
 
 1. Structural edges from table_scan.scan_join_edges, restricted to
-   *non*-comma join types (explicit JOIN...ON/USING -- otherwise
-   unreachable from any parse tree at all, see table_scan.py's module
-   docstring). scan.py's pre_chunk_hook filters out the COMMA join type
-   here on purpose: table_scan's own comma-join edge carries no predicate
-   at all, and source 2 below is exactly what recovers one for it -- so a
-   comma-join is deliberately sourced *only* from source 2, never both,
-   or every comma-join would be double-counted.
+   *non*-comma join types (explicit JOIN...ON/USING -- table_scan.py's own
+   token-scan discovery, independent of whether the parser can build a
+   tree for the JOIN). scan.py's pre_chunk_hook filters out the COMMA join
+   type here on purpose: table_scan's own comma-join edge carries no
+   predicate at all, and source 2 below is exactly what recovers one for
+   it -- so a comma-join is deliberately sourced *only* from source 2,
+   never both, or every comma-join would be double-counted.
 2. "WHERE-IMPLICIT" edges (_JoinPredicateVisitor below): an ordinary
    binary comparison between two table/alias-qualified columns that
    resolve, via table_scan.resolve_qualifier, to two distinct real tables
    in the same query block. This is the sole source for comma-joins (see
    above), and also independently catches an explicit JOIN's own
-   ON-clause (re-visited as an orphaned search_condition tree via
-   statement_driver's Tier 2 resync) -- scan.py's pre_chunk_hook also
-   dedupes that case against source 1's non-comma edges for the same
-   table pair in the same chunk, a coarser chunk-level dedup (not exact-
-   predicate matching) that trades undercounting a rare, genuinely
+   ON-clause. Before issue #4 / commit 7fea4c8 fixed the grammar's JOIN
+   parse path, an ON-clause's search_condition was unreachable from
+   Tier 1's tree at all and only ever surfaced as an orphaned fragment via
+   statement_driver's Tier 2 resync; now that ANSI JOINs parse as one
+   clean Tier-1 tree, the same visitor finds the ON-clause's comparison as
+   an ordinary descendant of that tree instead. Either way, scan.py's
+   pre_chunk_hook dedupes that case against source 1's non-comma edges for
+   the same table pair in the same chunk, a coarser chunk-level dedup (not
+   exact-predicate matching) that trades undercounting a rare, genuinely
    separate redundant WHERE-equality for the same pair against
    overcounting every ordinary JOIN.
 

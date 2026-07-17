@@ -6,10 +6,12 @@ parser; it only walks the already-lexed `Token` list (statement_driver.py's
 `lex_file()` output, one chunk's slice at a time) -- same spirit as
 supplementary_checks.py's existing Tier 3 token-scan fallback.
 
-This exists as a *separate* pass from the parser because two constructs it
-needs are unreachable from any parse tree the vendored `sql/db2` grammar
-(vendor/grammars-v4/Db2Parser.g4) can produce, confirmed empirically
-against the real generated parser:
+This exists as a *separate* pass from the parser because this module needs
+to discover tables/aliases/JOINs regardless of what tier the tiered driver
+resolved a given chunk at, and (as of issue #4 / commit 7fea4c8) uniformly
+across both comma-joins and ANSI `JOIN ... ON`/`USING` chains -- one
+mechanism instead of two. It originally existed to route around a real
+parse-tree gap:
 
 1. Schema-qualified names (`SCHEMA.TABLE`, `SCHEMA.TABLE.COLUMN`) don't
    parse at all -- `table_name`/`column_name` are always a single
@@ -17,21 +19,27 @@ against the real generated parser:
    `SELECT * FROM schema1.table1;` parses with zero syntax errors, but the
    tree only ever captures `table_name=schema1` -- `.table1` is silently
    left unconsumed in the token stream (no error, since `sql_statement()`,
-   what the tiered driver actually calls, is never EOF-anchored).
-2. `JOIN ... ON`/`USING` (ANSI join syntax) has no parse path at all --
-   `joined_table` is defined in the grammar but its only reference site is
-   commented out (`//| joined_table`). `FROM t1 a JOIN t2 b ON a.x=b.y`
-   parses with zero errors but the tree stops dead after `FROM t1 a`; `t2
-   b` is shredded one token at a time by the tiered driver's Tier-3 safety
-   valve and never forms any tree node. Only old-style comma-joins
-   (`FROM t1 a, t2 b WHERE a.x=b.y`) parse as one clean tree end-to-end.
+   what the tiered driver actually calls, is never EOF-anchored). This gap
+   is still open -- tracked in issue #1.
+2. `JOIN ... ON`/`USING` (ANSI join syntax) used to have no parse path at
+   all: `joined_table` was defined in the grammar but its only reference
+   site was commented out (`//| joined_table`), so `FROM t1 a JOIN t2 b ON
+   a.x=b.y` parsed with zero errors but the tree stopped dead after `FROM
+   t1 a`, with `t2 b` shredded one token at a time by the tiered driver's
+   Tier-3 safety valve. **Fixed** in issue #4 / commit 7fea4c8 -- ANSI
+   joins now parse as one clean tree, same as comma-joins always did. This
+   module's token-scan discovery of JOIN edges is kept regardless (see
+   above), but detection (extractor_visitor.py) and column-level
+   extraction (reference_visitor.py) both benefit directly from the fix,
+   since they walk the tree itself rather than re-scanning tokens.
 
 CTE names are excluded from the tables this module records (`WITH cte AS
-(...) SELECT * FROM cte` must not report `cte` as a real table) -- but
-note the *separate*, related CTE-body mis-parse issue (a CTE's body
-SELECT gets independently re-surfaced by the tiered driver as if it were
-its own standalone top-level statement) is --split-selects' concern
-(select_blocks.classify_chunk), not this module's.
+(...) SELECT * FROM cte` must not report `cte` as a real table). A
+*separate*, now-fixed issue -- a CTE's body SELECT used to get
+independently re-surfaced by the tiered driver as if it were its own
+standalone top-level statement (also issue #4 / commit 7fea4c8) -- used to
+matter to --split-selects' chunk classification (select_blocks.py); see
+that module's docstring for how it's unaffected either way.
 """
 
 from antlr4.Token import Token

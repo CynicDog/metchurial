@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """Orchestrates a full scan: scan_file() drives one file end to end through
-sensitive-column comparison detection and known-name matching plus the
-optional reference/relation/function/split-select extraction passes;
+metadata extraction (table/column/function/relation references, opt-in via
+--extract-metadata) alongside sensitive-column comparison detection and
+known-name matching (always on) and split-select counting (opt-in);
 scan_tree() walks a directory tree and merges per-file results, optionally
 across worker processes.
 
