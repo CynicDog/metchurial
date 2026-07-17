@@ -98,11 +98,18 @@ class TestKnownGrammarGap(unittest.TestCase):
         names = sorted(f["function"] for f in fc)
         self.assertEqual(names, ["AVG", "MIN", "SUM"])
 
-    def test_zero_argument_call_is_not_captured(self):
-        # arg_list is mandatory in function_invocation's grammar rule, not
-        # optional -- a zero-arg call has no valid parse path through it.
+
+class TestZeroArgumentCall(unittest.TestCase):
+    """function_invocation's arg_list is now optional (vendor/grammars-v4
+    fix) -- a zero-arg call like NOW() has a valid parse path and is
+    captured with an empty parameters string. Previously a known grammar
+    gap; see docs/PROVENANCE.md for the fix."""
+
+    def test_zero_argument_call_is_captured(self):
         fc = function_calls_for("SELECT NOW() FROM t1;")
-        self.assertEqual(fc, [])
+        self.assertEqual(len(fc), 1)
+        self.assertEqual(fc[0]["function"], "NOW")
+        self.assertEqual(fc[0]["parameters"], "")
 
 
 class TestPredicateExtraction(unittest.TestCase):

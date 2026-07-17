@@ -1,4 +1,4 @@
-# Generated from /Users/eunsang/Documents/Sources/metchurial-antlr/vendor/grammars-v4/Db2Lexer.g4 by ANTLR 4.13.2
+# Generated from /Users/eunsang/Documents/Sources/metchurial/vendor/grammars-v4/Db2Lexer.g4 by ANTLR 4.13.2
 from antlr4 import *
 from io import StringIO
 import sys

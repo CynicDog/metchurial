@@ -325,20 +325,20 @@ class TestTxtExtension(unittest.TestCase):
     def test_txt_included_by_default(self):
         hits, name_candidates, refs, rel, sbc, fc, bad, file_count = scanner.scan_tree(
             FIXTURES_DIR, scanner.DEFAULT_COLUMNS, set())
-        self.assertEqual(file_count, 16)  # 15 .sql + 1 .txt fixture
+        self.assertEqual(file_count, 19)  # 18 .sql + 1 .txt fixture
         self.assertTrue(any(h["value"] == "'0000070'" for h in hits))
 
     def test_sql_only_when_requested(self):
         hits, name_candidates, refs, rel, sbc, fc, bad, file_count = scanner.scan_tree(
             FIXTURES_DIR, scanner.DEFAULT_COLUMNS, set(), extensions=["sql"])
-        self.assertEqual(file_count, 15)
+        self.assertEqual(file_count, 18)
         self.assertFalse(any(h["value"] == "'0000070'" for h in hits))
 
     def test_exclude_paths_skips_own_output_files(self):
         excluded = {os.path.abspath(os.path.join(FIXTURES_DIR, "07_from_txt_export.txt"))}
         hits, name_candidates, refs, rel, sbc, fc, bad, file_count = scanner.scan_tree(
             FIXTURES_DIR, scanner.DEFAULT_COLUMNS, set(), exclude_paths=excluded)
-        self.assertEqual(file_count, 15)
+        self.assertEqual(file_count, 18)
         self.assertFalse(any(h["value"] == "'0000070'" for h in hits))
 
 

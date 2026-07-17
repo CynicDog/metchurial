@@ -1,4 +1,4 @@
-# Generated from /Users/eunsang/Documents/Sources/metchurial-antlr/vendor/grammars-v4/Db2Parser.g4 by ANTLR 4.13.2
+# Generated from /Users/eunsang/Documents/Sources/metchurial/vendor/grammars-v4/Db2Parser.g4 by ANTLR 4.13.2
 from antlr4 import *
 if "." in __name__:
     from .Db2Parser import Db2Parser
@@ -3956,11 +3956,6 @@ class Db2ParserVisitor(ParseTreeVisitor):
 
     # Visit a parse tree produced by Db2Parser#xmltable_function.
     def visitXmltable_function(self, ctx:Db2Parser.Xmltable_functionContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by Db2Parser#joined_table.
-    def visitJoined_table(self, ctx:Db2Parser.Joined_tableContext):
         return self.visitChildren(ctx)
 
 
