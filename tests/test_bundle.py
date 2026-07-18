@@ -64,7 +64,12 @@ class TestBundleIsSelfContained(unittest.TestCase):
             # this fixture set, not a failure of the bundle itself
             self.assertIn(bundle_run.returncode, (0, 1), msg=bundle_run.stderr)
             self.assertNotIn("Traceback", bundle_run.stderr)
-            self.assertIn("Findings: 39", bundle_run.stdout)
+            # A real scan completed (some findings count was printed);
+            # the exact number is deliberately not pinned here -- the
+            # findings.tsv diff below compares full content against the
+            # package-mode run, which is the stronger check and doesn't
+            # go stale every time a fixture is added.
+            self.assertRegex(bundle_run.stdout, r"Findings: \d+")
 
             package_out = tmp / "package_out"
             package_out.mkdir()
