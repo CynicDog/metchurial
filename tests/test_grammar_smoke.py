@@ -24,13 +24,12 @@ import os
 import sys
 import unittest
 
-GENERATED_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "generated")
-sys.path.insert(0, GENERATED_DIR)
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
 from antlr4 import InputStream, CommonTokenStream  # noqa: E402
 from antlr4.error.ErrorListener import ErrorListener  # noqa: E402
-from Db2Lexer import Db2Lexer  # noqa: E402
-from Db2Parser import Db2Parser  # noqa: E402
+from metchurial._generated.Db2Lexer import Db2Lexer  # noqa: E402
+from metchurial._generated.Db2Parser import Db2Parser  # noqa: E402
 
 
 class _CollectingErrorListener(ErrorListener):

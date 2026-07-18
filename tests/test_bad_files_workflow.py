@@ -16,11 +16,10 @@ import tempfile
 import unittest
 from unittest import mock
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
-import src  # noqa: E402  (bootstraps generated/ onto sys.path)
-from src import scan as scanner  # noqa: E402
-from src.io_utils import load_bad_files, write_bad_files  # noqa: E402
+from metchurial import engine as scanner  # noqa: E402
+from metchurial.io_utils import load_bad_files, write_bad_files  # noqa: E402
 
 
 class TestBadFilesIO(unittest.TestCase):
@@ -65,8 +64,7 @@ class TestScanFileSafetyNets(unittest.TestCase):
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write("========================================\nSELECT * FROM t1;\n")
-            result = scanner.scan_file(
-                path, scanner.DEFAULT_COLUMNS, set())
+            result = scanner.scan_file(path)
             self.assertIsNotNone(result.bad_reason)
             self.assertEqual((result.findings, result.name_candidates, result.select_block_count),
                              ([], [], 0))
@@ -78,9 +76,8 @@ class TestScanFileSafetyNets(unittest.TestCase):
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write("SELECT * FROM t1 WHERE ACCT_ID = '1';\n")
-            with mock.patch("src.scan._scan_file_body", side_effect=RuntimeError("boom")):
-                result = scanner.scan_file(
-                    path, scanner.DEFAULT_COLUMNS, set())
+            with mock.patch("metchurial.engine._scan_file_body", side_effect=RuntimeError("boom")):
+                result = scanner.scan_file(path)
             self.assertIsNotNone(result.bad_reason)
             self.assertIn("RuntimeError", result.bad_reason)
             self.assertIn("boom", result.bad_reason)
@@ -94,8 +91,7 @@ class TestScanFileSafetyNets(unittest.TestCase):
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write("SELECT * FROM t1 WHERE ACCT_ID = '1';\n")
-            result = scanner.scan_file(
-                path, scanner.DEFAULT_COLUMNS, set())
+            result = scanner.scan_file(path)
             self.assertIsNone(result.bad_reason)
             self.assertEqual(len(result.findings), 1)
         finally:

@@ -19,12 +19,11 @@ import os
 import sys
 import unittest
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
-import src  # noqa: E402  (bootstraps generated/ onto sys.path)
 from antlr4 import InputStream, CommonTokenStream  # noqa: E402
-from Db2Lexer import Db2Lexer  # noqa: E402
-from src.detect.supplementary_checks import make_token_scan_fallback  # noqa: E402
+from metchurial._generated.Db2Lexer import Db2Lexer  # noqa: E402
+from metchurial.detect.supplementary_checks import make_token_scan_fallback  # noqa: E402
 
 
 def _stream(sql):

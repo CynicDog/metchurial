@@ -18,10 +18,10 @@ import sys
 import tempfile
 import unittest
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
-import src  # noqa: E402  (bootstraps generated/ onto sys.path)
-from src import scan as scanner  # noqa: E402
+from metchurial import engine as scanner  # noqa: E402
+from metchurial.models.options import ScanOptions  # noqa: E402
 
 
 def function_calls_for(text):
@@ -29,8 +29,7 @@ def function_calls_for(text):
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(text)
-        result = scanner.scan_file(
-            path, scanner.DEFAULT_COLUMNS, set(), extract_functions=True)
+        result = scanner.scan_file(path, ScanOptions(extract_functions=True))
         return result.function_calls
     finally:
         os.unlink(path)
@@ -70,8 +69,7 @@ class TestBasicExtraction(unittest.TestCase):
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write("SELECT SUBSTR(cust_nm, 1, 3) FROM t1;")
-            result = scanner.scan_file(
-                path, scanner.DEFAULT_COLUMNS, set())
+            result = scanner.scan_file(path)
             self.assertEqual(result.function_calls, [])
         finally:
             os.unlink(path)
@@ -181,8 +179,7 @@ class TestPredicateExtraction(unittest.TestCase):
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write("SELECT * FROM t1 WHERE ACCT_ID = '123';")
-            result = scanner.scan_file(
-                path, scanner.DEFAULT_COLUMNS, set())
+            result = scanner.scan_file(path)
             self.assertEqual(result.function_calls, [])
         finally:
             os.unlink(path)

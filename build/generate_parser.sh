@@ -2,13 +2,13 @@
 # Dev-only: regenerates the Python3 ANTLR lexer/parser/visitor from the
 # vendored Db2 grammar. Requires Java + antlr4-tools (see pyproject.toml's
 # [dependency-groups] dev group -- `uv sync` installs it). NOT run in the
-# restricted target environment -- generated/ is committed so that
+# restricted target environment -- src/metchurial/_generated/ is committed so that
 # environment never needs Java or ANTLR.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 GRAMMAR_DIR="$ROOT/vendor/grammars-v4"
-OUT_DIR="$ROOT/generated"
+OUT_DIR="$ROOT/src/metchurial/_generated"
 
 rm -rf "$OUT_DIR"
 mkdir -p "$OUT_DIR"

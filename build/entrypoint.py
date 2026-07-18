@@ -24,7 +24,7 @@ if __name__ != "__main__":
     import shutil
     shutil.rmtree = lambda *args, **kwargs: None
 
-from src.cli import main
+from metchurial.cli import main
 
 if __name__ == "__main__":
     main()

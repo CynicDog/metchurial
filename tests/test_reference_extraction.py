@@ -15,10 +15,10 @@ import sys
 import tempfile
 import unittest
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
-import src  # noqa: E402  (bootstraps generated/ onto sys.path)
-from src import scan as scanner  # noqa: E402
+from metchurial import engine as scanner  # noqa: E402
+from metchurial.models.options import ScanOptions  # noqa: E402
 
 
 def refs_for(text, extract_table_refs=True, extract_column_refs=True):
@@ -26,9 +26,8 @@ def refs_for(text, extract_table_refs=True, extract_column_refs=True):
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(text)
-        result = scanner.scan_file(
-            path, scanner.DEFAULT_COLUMNS, set(),
-            extract_table_refs=extract_table_refs, extract_column_refs=extract_column_refs)
+        result = scanner.scan_file(path, ScanOptions(
+            extract_table_refs=extract_table_refs, extract_column_refs=extract_column_refs))
         return result
     finally:
         os.unlink(path)
@@ -72,9 +71,8 @@ class TestColumnRefs(unittest.TestCase):
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write("SELECT * FROM t1 a WHERE a.ACCT_ID = '0000001';")
-            result = scanner.scan_file(
-                path, scanner.DEFAULT_COLUMNS, set(),
-                extract_table_refs=True, extract_column_refs=True)
+            result = scanner.scan_file(path, ScanOptions(
+                extract_table_refs=True, extract_column_refs=True))
             self.assertEqual(len(result.findings), 1)
             self.assertEqual(result.findings[0].value, "'0000001'")
             self.assertTrue(any(r.table == "T1" for r in result.table_uses))

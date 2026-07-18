@@ -23,10 +23,11 @@ import sys
 import tempfile
 import unittest
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
-import src  # noqa: E402  (bootstraps generated/ onto sys.path)
-from src.scan import DEFAULT_COLUMNS, scan_file  # noqa: E402
+from metchurial.engine import scan_file  # noqa: E402
+from metchurial.models.options import DEFAULT_SENSITIVE_COLUMNS as DEFAULT_COLUMNS  # noqa: E402
+from metchurial.models.options import ScanOptions  # noqa: E402
 
 
 def scan_text(content, columns=None):
@@ -36,7 +37,7 @@ def scan_text(content, columns=None):
         f.write(content)
         path = f.name
     try:
-        result = scan_file(path, columns, set())
+        result = scan_file(path, ScanOptions(sensitive_columns=tuple(columns)))
         return result.findings, result.name_candidates
     finally:
         os.unlink(path)

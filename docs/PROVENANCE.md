@@ -1,5 +1,8 @@
 # Third-party provenance
 
+metchurial's own code is MIT-licensed (see the repository-root `LICENSE`
+file); everything below concerns the third-party code it vendors.
+
 This project vendors two pieces of third-party, permissively-licensed code
 so that the final deployable artifact (`dist/metchurial.py`)
 can run with zero `pip install`s in a restricted target environment. Both
@@ -120,7 +123,7 @@ restricted environment.
   named token in the lexer -- ANTLR needs `Db2Lexer.tokens` to already
   exist before it can resolve them. `build/generate_parser.sh` generates
   the lexer first, then the parser with `-lib` pointing at that output.
-- **Generated code**: `generated/` (ANTLR codegen output from these `.g4`
+- **Generated code**: `src/metchurial/_generated/` (ANTLR codegen output from these `.g4`
   files) inherits the same MIT provenance; ANTLR's own codegen header
   comment ("Generated from Db2Parser.g4 by ANTLR 4.13.2") must be left
   intact, not stripped, including in the bundled `dist/` artifact.

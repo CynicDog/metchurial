@@ -17,11 +17,10 @@ import os
 import sys
 import unittest
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
-import src  # noqa: E402  (bootstraps generated/ onto sys.path)
-from src.parsing.statement_driver import lex_file, chunk_ranges  # noqa: E402
-from src.references import table_scan as ts  # noqa: E402
+from metchurial.parsing.statement_driver import lex_file, chunk_ranges  # noqa: E402
+from metchurial.references import table_scan as ts  # noqa: E402
 
 
 def _blocks_for(sql):

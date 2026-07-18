@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """Ported from ../metchurial/tests/test_scan.py -- same assertions, same
-fixtures, run against the new ANTLR-based scan.py instead of the original
+fixtures, run against the new ANTLR-based engine.py instead of the original
 regex engine. This file is the acceptance bar for the migration: parity
 with the original tool's tested behavior.
 
@@ -15,19 +15,19 @@ import tempfile
 import unittest
 
 FIXTURES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
-import src  # noqa: E402  (bootstraps generated/ onto sys.path)
-from src import mask  # noqa: E402
-from src import scan as scanner  # noqa: E402
-from src.split.select_blocks import select_block_ranges  # noqa: E402
-from src.parsing.statement_driver import chunk_ranges, lex_file  # noqa: E402
+from metchurial import mask  # noqa: E402
+from metchurial import engine as scanner  # noqa: E402
+from metchurial.models.options import ScanOptions  # noqa: E402
+from metchurial.split.select_blocks import select_block_ranges  # noqa: E402
+from metchurial.parsing.statement_driver import chunk_ranges, lex_file  # noqa: E402
 
 
 def scan(filename, stopwords=None, known_names=None):
     path = os.path.join(FIXTURES_DIR, filename)
     result = scanner.scan_file(
-        path, scanner.DEFAULT_COLUMNS, stopwords or set(), known_names or set())
+        path, ScanOptions(stopwords=stopwords or set(), known_names=known_names or set()))
     return result.findings, result.name_candidates
 
 
@@ -40,7 +40,7 @@ def scan_text(text, stopwords=None, known_names=None):
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(text)
         result = scanner.scan_file(
-            path, scanner.DEFAULT_COLUMNS, stopwords or set(), known_names or set())
+            path, ScanOptions(stopwords=stopwords or set(), known_names=known_names or set()))
         return result.findings, result.name_candidates
     finally:
         os.unlink(path)
@@ -304,8 +304,7 @@ class TestComplexRealWorldQuery(unittest.TestCase):
         # tests/test_select_blocks.py; this test reads the classification
         # read-only instead so it stays independent of that).
         path = os.path.join(FIXTURES_DIR, "14_complex_multi_cte_query.sql")
-        result = scanner.scan_file(
-            path, scanner.DEFAULT_COLUMNS, set(), extract_table_refs=True)
+        result = scanner.scan_file(path, ScanOptions(extract_table_refs=True))
         tables = {r.table for r in result.table_uses}
         self.assertEqual(tables, {"T1", "T2", "T_REF", "T_MAP", "T_CODE",
                                  "T_HIST", "SYSDUMMY1"})
@@ -323,21 +322,18 @@ class TestComplexRealWorldQuery(unittest.TestCase):
 
 class TestTxtExtension(unittest.TestCase):
     def test_txt_included_by_default(self):
-        tree = scanner.scan_tree(
-            FIXTURES_DIR, scanner.DEFAULT_COLUMNS, set())
+        tree = scanner.scan_tree(FIXTURES_DIR)
         self.assertEqual(tree.file_count, 38)  # 37 .sql + 1 .txt fixture
         self.assertTrue(any(h.value == "'0000070'" for h in tree.findings))
 
     def test_sql_only_when_requested(self):
-        tree = scanner.scan_tree(
-            FIXTURES_DIR, scanner.DEFAULT_COLUMNS, set(), extensions=["sql"])
+        tree = scanner.scan_tree(FIXTURES_DIR, ScanOptions(extensions=("sql",)))
         self.assertEqual(tree.file_count, 37)
         self.assertFalse(any(h.value == "'0000070'" for h in tree.findings))
 
     def test_exclude_paths_skips_own_output_files(self):
         excluded = {os.path.abspath(os.path.join(FIXTURES_DIR, "07_from_txt_export.txt"))}
-        tree = scanner.scan_tree(
-            FIXTURES_DIR, scanner.DEFAULT_COLUMNS, set(), exclude_paths=excluded)
+        tree = scanner.scan_tree(FIXTURES_DIR, exclude_paths=excluded)
         self.assertEqual(tree.file_count, 37)
         self.assertFalse(any(h.value == "'0000070'" for h in tree.findings))
 
@@ -370,7 +366,7 @@ class TestMaskingEndToEnd(unittest.TestCase):
 
     def test_masking_pipeline(self):
         result = scanner.scan_file(
-            self.path, scanner.DEFAULT_COLUMNS, set(), self.KNOWN_NAMES)
+            self.path, ScanOptions(known_names=self.KNOWN_NAMES))
         hits = result.findings
         self.assertEqual(len(hits), 15)
         self.assertEqual(result.name_candidates, [])
@@ -402,13 +398,13 @@ class TestMaskingEndToEnd(unittest.TestCase):
         # still a literal), and re-masking must be a no-op: '****'/'0000'
         # simply mask to themselves.
         hits = scanner.scan_file(
-            self.path, scanner.DEFAULT_COLUMNS, set(), self.KNOWN_NAMES).findings
+            self.path, ScanOptions(known_names=self.KNOWN_NAMES)).findings
         mask.write_masked_files(hits)
         with open(self.path, encoding="utf-8") as f:
             once = f.read()
 
         hits2 = scanner.scan_file(
-            self.path, scanner.DEFAULT_COLUMNS, set(), self.KNOWN_NAMES).findings
+            self.path, ScanOptions(known_names=self.KNOWN_NAMES)).findings
         mask.write_masked_files(hits2)
         with open(self.path, encoding="utf-8") as f:
             twice = f.read()
@@ -434,8 +430,7 @@ class TestSplitOutputNeverRescannedAsInput(unittest.TestCase):
         shutil.rmtree(self.d)
 
     def test_split_output_excluded_from_file_count_and_hits(self):
-        tree = scanner.scan_tree(
-            self.d, scanner.DEFAULT_COLUMNS, set())
+        tree = scanner.scan_tree(self.d)
         self.assertEqual(tree.file_count, 1)
         self.assertEqual(len(tree.findings), 1)
 

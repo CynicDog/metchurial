@@ -62,11 +62,45 @@ uv run metchurial /sql/root --extract-metadata --split-selects
 ```
 
 `uv sync` pulls in just the one runtime dependency this needs
-(`antlr4-python3-runtime`, exact-pinned to match the version `generated/`'s
+(`antlr4-python3-runtime`, exact-pinned to match the version `src/metchurial/_generated/`'s
 parser was built with) into a project-local `.venv` — no Java, no ANTLR
 tooling required for that (those are dev-only, for regenerating
-`generated/` or rebuilding `dist/metchurial.py` itself — see
+`src/metchurial/_generated/` or rebuilding `dist/metchurial.py` itself — see
 [Dev workflow](#dev-workflow)).
+
+### Using as a library
+
+The CLI is one consumer of a plain Python API — `pip install` (or
+`uv add`) the package and drive scans from your own code:
+
+```python
+import metchurial
+
+# One call: scan a tree with every metadata analysis on.
+result = metchurial.scan("/sql/root", metchurial.ScanOptions.metadata())
+
+for f in result.findings:                       # sensitive-value findings
+    print(f.file, f.line, f.column_name, f.value)
+for row in result.identity_rows:                # per-statement core_ids
+    print(row.core_id, row.file, row.line)
+
+# Or per-file, with only what you need switched on:
+one = metchurial.scan_file(
+    "query.sql",
+    metchurial.ScanOptions(sensitive_columns=("ACCT_ID", "HLDR_NM"),
+                           extract_relations=True))
+```
+
+`scan()`/`scan_file()` return typed result objects
+(`TreeScanResult`/`FileScanResult` of `Finding`/`TableUse`/`RelationEdge`/
+`IdentityRow`/... rows) and never print or write files on their own —
+report artifacts (`summary.md`, `findings.tsv`, `refs_*.tsv`) are the
+CLI's job. The one exception is `ScanOptions(split_selects=True)`, which
+writes `-NN` split files next to each multi-SELECT source file, same as
+the `--split-selects` flag. Everything a scan can be told is a field on
+`ScanOptions` (a frozen dataclass); `ScanOptions.metadata()` is shorthand
+for switching every `extract_*` analysis on, mirroring
+`--extract-metadata`.
 
 ## CLI reference
 
@@ -75,7 +109,8 @@ tooling required for that (those are dev-only, for regenerating
 | `root` (positional) | — | Directory to scan recursively |
 | `--sensitive-columns` | `ACCT_ID CTRT_NO ACCT_NM ACCT_NAME` | Column names sensitive-column comparison detection treats as sensitive; fully replaces the default list, doesn't add to it |
 | `--extensions` | `sql txt` | File extensions to scan, without the dot |
-| `--extract-metadata` | off | Also emit `refs_tables.tsv`/`refs_columns.tsv`/`refs_functions.tsv`/`refs_relations.tsv` (schema/table/column refs, JOIN relationships, function/predicate usage) and matching summary.md sections — see [Output artifacts](#output-artifacts) |
+| `--extract-metadata` | off | Also emit `refs_tables.tsv`/`refs_columns.tsv`/`refs_functions.tsv`/`refs_relations.tsv`/`refs_query_identity.tsv` (schema/table/column refs, JOIN relationships, function/predicate usage, per-statement structural identity) and matching summary.md sections — see [Output artifacts](#output-artifacts) |
+| `--query-similarity` | off | Also emit `refs_query_similarity.tsv`: pairwise Jaccard similarity between statements that don't share a `core_id`. Opt-in because the pass is O(n²) in the number of *distinct* core_ids — fine for thousands of distinct queries, slow for tens of thousands. Requires `--extract-metadata` |
 | `--split-selects` | off | For a file with 2+ standalone SELECT blocks, write one `<stem>-NN<ext>` file per block alongside the original (files with a single block are left as-is) |
 | `--mask-literals` | off | Rewrite in place every flagged literal's content to a fixed placeholder (`'****'`/`"****"` for quoted, `0000` for unquoted numeric), everything else byte-for-byte identical — back up files first, this overwrites them |
 | `--workers N` | `1` | Scan across N worker processes instead of one |
@@ -152,7 +187,7 @@ The column and table names used throughout this repo — `ACCT_ID`,
 `CTRT_NO`, `ACCT_NM`, `ACCT_NAME`, `HLDR_NM`, `TBSAMPLE001`, `STAT_CD` —
 are placeholders, not real production schema names from any actual DB2
 environment, swapped in consistently before this repo was made public.
-They appear in `DEFAULT_COLUMNS` (`src/scan.py`, `--sensitive-columns`'s
+They appear in `DEFAULT_SENSITIVE_COLUMNS` (`src/metchurial/models/options.py`, `--sensitive-columns`'s
 built-in default), every fixture under `tests/fixtures/`, and this
 README's own examples. This doesn't affect behavior — `--sensitive-columns`
 always fully replaces the default list, so a real deployment should pass
@@ -179,6 +214,8 @@ not a duplicate of it.
 | `refs_columns.tsv` | `--extract-metadata` | Every `schema.table.column` reference found, with file/line |
 | `refs_functions.tsv` | `--extract-metadata` | Every function call and predicate operator found, with operands/file/line |
 | `refs_relations.tsv` | `--extract-metadata` | Table-to-table JOIN usage aggregated across the whole scan (one file, not per-directory) |
+| `refs_query_identity.tsv` | `--extract-metadata` | One `core_id` per statement — structurally identical statements share one id regardless of aliasing/projection/formatting differences |
+| `refs_query_similarity.tsv` | `--query-similarity` | Pairwise Jaccard similarity between distinct `core_id`s that don't match exactly |
 
 ## Bad files
 
@@ -247,7 +284,7 @@ runs in the restricted target environment; only `dist/metchurial.py` does.
 ```bash
 uv sync
 
-# regenerate generated/ from vendor/grammars-v4/*.g4 (only needed after
+# regenerate src/metchurial/_generated/ from vendor/grammars-v4/*.g4 (only needed after
 # touching the grammar itself)
 uv run bash build/generate_parser.sh
 

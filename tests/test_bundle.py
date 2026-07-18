@@ -34,6 +34,8 @@ def _run(args, cwd, env=None):
     return subprocess.run(args, cwd=str(cwd), env=env, capture_output=True, text=True)
 
 
+@unittest.skipIf(os.environ.get("SKIP_BUNDLE_TEST") == "1",
+                 "bundle self-containment runs in its own CI job (see .github/workflows/ci.yml)")
 class TestBundleIsSelfContained(unittest.TestCase):
     def test_bundle_runs_with_zero_third_party_packages(self):
         build = _run([sys.executable, "build/bundle.py"], cwd=ROOT)
@@ -68,9 +70,9 @@ class TestBundleIsSelfContained(unittest.TestCase):
             package_out.mkdir()
             # cwd is package_out (so its output lands there, not in ROOT),
             # so "src" must be reachable via PYTHONPATH instead of cwd.
-            package_env = dict(os.environ, PYTHONPATH=str(ROOT))
+            package_env = dict(os.environ, PYTHONPATH=str(ROOT / "src"))
             package_run = _run(
-                [sys.executable, "-m", "src.cli", str(FIXTURES_DIR)],
+                [sys.executable, "-m", "metchurial.cli", str(FIXTURES_DIR)],
                 cwd=package_out, env=package_env)
             self.assertIn(package_run.returncode, (0, 1), msg=package_run.stderr)
 

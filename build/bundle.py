@@ -31,8 +31,7 @@ def main():
     cmd = [
         str(stickytape_bin),
         str(ROOT / "build" / "entrypoint.py"),
-        "--add-python-path", str(ROOT),
-        "--add-python-path", str(ROOT / "generated"),
+        "--add-python-path", str(ROOT / "src"),
         "--add-python-path", str(ROOT / "vendor" / "antlr4-python3-runtime"),
         "--output-file", str(output),
     ]

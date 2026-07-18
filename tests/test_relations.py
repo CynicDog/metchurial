@@ -6,7 +6,7 @@ JOIN...ON's own predicate is independently re-visited as an orphaned
 search_condition tree (statement_driver's Tier 2 resync), and a
 comma-join's structural edge carries no predicate at all -- both of these
 would silently double-count every ordinary JOIN/comma-join if not
-deliberately deduped in scan.py's pre_chunk_hook (see there and
+deliberately deduped in engine.py's pre_chunk_hook (see there and
 relations.py's module docstring for the full explanation).
 
 Run:
@@ -18,12 +18,12 @@ import sys
 import tempfile
 import unittest
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
-import src  # noqa: E402  (bootstraps generated/ onto sys.path)
-from src.models.relations import RelationEdge  # noqa: E402
-from src.references import relations  # noqa: E402
-from src import scan as scanner  # noqa: E402
+from metchurial.models.relations import RelationEdge  # noqa: E402
+from metchurial.references import relations  # noqa: E402
+from metchurial import engine as scanner  # noqa: E402
+from metchurial.models.options import ScanOptions  # noqa: E402
 
 
 def relation_edges_for(text):
@@ -31,8 +31,7 @@ def relation_edges_for(text):
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(text)
-        result = scanner.scan_file(
-            path, scanner.DEFAULT_COLUMNS, set(), extract_relations=True)
+        result = scanner.scan_file(path, ScanOptions(extract_relations=True))
         return result.relation_edges
     finally:
         os.unlink(path)

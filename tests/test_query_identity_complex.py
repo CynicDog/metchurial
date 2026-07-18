@@ -23,10 +23,10 @@ import sys
 import tempfile
 import unittest
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
-import src  # noqa: E402  (bootstraps generated/ onto sys.path)
-from src import scan as scanner  # noqa: E402
+from metchurial import engine as scanner  # noqa: E402
+from metchurial.models.options import ScanOptions  # noqa: E402
 
 
 def _identity_rows(sql):
@@ -34,8 +34,7 @@ def _identity_rows(sql):
         f.write(sql)
         path = f.name
     try:
-        result = scanner.scan_file(path, scanner.DEFAULT_COLUMNS, set(),
-                                   extract_query_identity=True)
+        result = scanner.scan_file(path, ScanOptions(extract_query_identity=True))
         assert result.bad_reason is None, result.bad_reason
         return result.identity_rows
     finally:

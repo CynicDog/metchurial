@@ -1,15 +1,29 @@
 [project]
 name = "metchurial"
 version = "0.1.0"
-description = "Static scanner that detects hardcoded sensitive values in DB2 SQL files"
+description = "ANTLR-backed engine that turns DB2 SQL source into structured, queryable metadata -- with hardcoded-sensitive-value detection as one built-in analysis"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.9"
 dependencies = [
     "antlr4-python3-runtime==4.13.2",
 ]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Database",
+    "Topic :: Software Development :: Quality Assurance",
+]
+
+[project.urls]
+Repository = "https://github.com/CynicDog/metchurial"
+Issues = "https://github.com/CynicDog/metchurial/issues"
 
 [project.scripts]
-metchurial = "src.cli:main"
+metchurial = "metchurial.cli:main"
 
 [dependency-groups]
 dev = [
@@ -23,9 +37,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src"]
+packages = ["src/metchurial"]
 
 [tool.ruff]
 line-length = 120
 target-version = "py39"
-extend-exclude = ["generated", "vendor"]
+extend-exclude = ["src/metchurial/_generated", "vendor"]

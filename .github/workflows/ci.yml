@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: tests (${{ matrix.os }}, py${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        python-version: ["3.9", "3.11", "3.13"]
+        include:
+          - os: windows-latest
+            python-version: "3.13"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: uv sync
+      # test_bundle is exercised by the dedicated bundle job below (it
+      # rebuilds dist/ and needs a throwaway venv); excluding it here
+      # keeps the matrix fast.
+      - run: uv run python -m unittest discover -s tests -p "test_*.py" -v
+        env:
+          SKIP_BUNDLE_TEST: "1"
+      - run: uv run ruff check src tests
+
+  bundle:
+    name: bundle self-containment (dist/metchurial.py)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+      - run: uv sync
+      # Rebuilds dist/metchurial.py and runs it in a venv with zero
+      # third-party packages, diffing against a package-mode run -- the
+      # actual proof the single-file artifact is self-contained (this is
+      # the check README's "verified in CI" line refers to).
+      - run: uv run python -m unittest tests.test_bundle -v

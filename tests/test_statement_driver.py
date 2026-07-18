@@ -14,12 +14,11 @@ import os
 import sys
 import unittest
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
-import src  # noqa: E402  (bootstraps generated/ onto sys.path)
-from src.detect.extractor_visitor import ExtractorVisitor  # noqa: E402
-from src.parsing.statement_driver import parse_file  # noqa: E402
-from src.detect.supplementary_checks import make_token_scan_fallback  # noqa: E402
+from metchurial.detect.extractor_visitor import ExtractorVisitor  # noqa: E402
+from metchurial.parsing.statement_driver import parse_file  # noqa: E402
+from metchurial.detect.supplementary_checks import make_token_scan_fallback  # noqa: E402
 
 
 class _RecordingVisitor(object):

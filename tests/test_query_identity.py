@@ -20,11 +20,11 @@ import sys
 import unittest
 
 FIXTURES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
-import src  # noqa: E402  (bootstraps generated/ onto sys.path)
-from src import scan as scanner  # noqa: E402
-from src.references import query_identity  # noqa: E402
+from metchurial import engine as scanner  # noqa: E402
+from metchurial.models.options import ScanOptions  # noqa: E402
+from metchurial.references import query_identity  # noqa: E402
 
 CORE_A = ["20_query_identity_base.sql", "21_query_identity_alias_variant.sql",
          "22_query_identity_extra_column.sql", "23_query_identity_derived_column_variant.sql",
@@ -39,7 +39,7 @@ HARD_CASES = ["33_query_hard_case_subquery_rewrite.sql", "37_query_hard_case_uni
 
 def _identity_rows(filename):
     path = os.path.join(FIXTURES_DIR, filename)
-    result = scanner.scan_file(path, scanner.DEFAULT_COLUMNS, set(), extract_query_identity=True)
+    result = scanner.scan_file(path, ScanOptions(extract_query_identity=True))
     assert result.bad_reason is None, (filename, result.bad_reason)
     return result.identity_rows
 
@@ -47,7 +47,7 @@ def _identity_rows(filename):
 def _core_id(filename):
     """Every fixture in this corpus is exactly one real statement -- one
     identity row once the trailing-EOF-chunk artifact is filtered (see
-    scan.py)."""
+    engine.py)."""
     rows = _identity_rows(filename)
     assert len(rows) == 1, (filename, rows)
     return rows[0].core_id

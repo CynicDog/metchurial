@@ -22,17 +22,17 @@ import sys
 import unittest
 
 FIXTURES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
-import src  # noqa: E402  (bootstraps generated/ onto sys.path)
-from src import scan as scanner  # noqa: E402
-from src.parsing.statement_driver import chunk_ranges, lex_file  # noqa: E402
-from src.split.select_blocks import select_block_ranges  # noqa: E402
+from metchurial import engine as scanner  # noqa: E402
+from metchurial.models.options import ScanOptions  # noqa: E402
+from metchurial.parsing.statement_driver import chunk_ranges, lex_file  # noqa: E402
+from metchurial.split.select_blocks import select_block_ranges  # noqa: E402
 
 
 def _scan(filename, **kwargs):
     path = os.path.join(FIXTURES_DIR, filename)
-    return scanner.scan_file(path, scanner.DEFAULT_COLUMNS, set(), **kwargs)
+    return scanner.scan_file(path, ScanOptions(**kwargs))
 
 
 class TestAnsiJoinChain(unittest.TestCase):
