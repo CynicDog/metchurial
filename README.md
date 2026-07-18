@@ -68,10 +68,20 @@ tooling required for that (those are dev-only, for regenerating
 `src/metchurial/_generated/` or rebuilding `dist/metchurial.py` itself — see
 [Dev workflow](#dev-workflow)).
 
+### Installing from PyPI
+
+```bash
+pip install metchurial    # or: uv add metchurial
+```
+
+This installs the `metchurial` CLI and the library API below. The
+single-file `dist/metchurial.py` remains the distribution channel for
+restricted environments where even `pip install` isn't an option.
+
 ### Using as a library
 
-The CLI is one consumer of a plain Python API — `pip install` (or
-`uv add`) the package and drive scans from your own code:
+The CLI is one consumer of a plain Python API — install the package and
+drive scans from your own code:
 
 ```python
 import metchurial
@@ -297,7 +307,14 @@ uv run ruff check src
 
 # rebuild the deployable single-file artifact
 uv run python build/bundle.py
+
+# build the PyPI sdist+wheel (kept out of dist/, which holds the bundle)
+uv build --out-dir pypi-dist
 ```
+
+Publishing to PyPI is automated: publishing a GitHub release triggers
+`.github/workflows/publish.yml`, which builds and uploads via PyPI
+trusted publishing — no API tokens involved.
 
 ## Licensing
 

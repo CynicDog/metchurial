@@ -1,0 +1,19 @@
+name: Publish to PyPI
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write  # PyPI trusted publishing (OIDC), no token secrets
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      # --out-dir keeps the build away from dist/, which holds the
+      # committed single-file bundle (a separate distribution channel).
+      - run: uv build --out-dir pypi-dist
+      - run: uv publish pypi-dist/*

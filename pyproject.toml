@@ -38,6 +38,13 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/metchurial"]
+# ANTLR debugging artifacts, never read by the Python runtime.
+exclude = ["*.interp", "*.tokens"]
+
+# Package source only -- dist/, vendor/, build/, tests/ are the repo's
+# concern, not the sdist's.
+[tool.hatch.build.targets.sdist]
+only-include = ["src/metchurial", "docs/PROVENANCE.md"]
 
 [tool.ruff]
 line-length = 120
