@@ -106,8 +106,8 @@ one = metchurial.scan_file(
 `IdentityRow`/... rows) and never print or write files on their own —
 report artifacts (`summary.md`, `findings.tsv`, `refs_*.tsv`) are the
 CLI's job. The one exception is `ScanOptions(split_selects=True)`, which
-writes `-NN` split files next to each multi-SELECT source file, same as
-the `--split-selects` flag. Everything a scan can be told is a field on
+writes `-NN` split files next to each multi-SELECT source file and deletes
+the original, same as the `--split-selects` flag. Everything a scan can be told is a field on
 `ScanOptions` (a frozen dataclass); `ScanOptions.metadata()` is shorthand
 for switching every `extract_*` analysis on, mirroring
 `--extract-metadata`.
@@ -153,7 +153,7 @@ literals are sensitive or which unparseable files are safe to ignore.
 | `--extensions` | `sql txt` | File extensions to scan, without the dot |
 | `--extract-metadata` | off | Also emit `refs_tables.tsv`/`refs_columns.tsv`/`refs_functions.tsv`/`refs_relations.tsv`/`refs_query_identity.tsv` (schema/table/column refs, JOIN relationships, function/predicate usage, per-statement structural identity) and matching summary.md sections — see [Output artifacts](#output-artifacts) |
 | `--query-similarity` | off | Also emit `refs_query_similarity.tsv`: pairwise Jaccard similarity between statements that don't share a `core_id`. Opt-in because the pass is O(n²) in the number of *distinct* core_ids — fine for thousands of distinct queries, slow for tens of thousands. Requires `--extract-metadata` |
-| `--split-selects` | off | For a file with 2+ standalone SELECT blocks, write one `<stem>-NN<ext>` file per block alongside the original (files with a single block are left as-is) |
+| `--split-selects` | off | For a file with 2+ standalone SELECT blocks, write one `<stem>-NN<ext>` file per block alongside the original, then delete the original and record the mapping in `split_manifest.tsv` (files with a single block are left as-is). Only safe to run against a tree you already have a separate copy of |
 | `--mask-literals` | off | Rewrite in place every flagged literal's content to a fixed placeholder (`'****'`/`"****"` for quoted, `0000` for unquoted numeric), everything else byte-for-byte identical — back up files first, this overwrites them |
 | `--workers N` | `1` | Scan across N worker processes instead of one |
 | `--max-chunk-iterations N` | `200000` | Safety-valve cap on the resync driver's loop iterations per statement chunk |
@@ -258,6 +258,7 @@ not a duplicate of it.
 | `refs_relations.tsv` | `--extract-metadata` | Table-to-table JOIN usage aggregated across the whole scan (one file, not per-directory) |
 | `refs_query_identity.tsv` | `--extract-metadata` | One `core_id` per statement — structurally identical statements share one id regardless of aliasing/projection/formatting differences |
 | `refs_query_similarity.tsv` | `--query-similarity` | Pairwise Jaccard similarity between distinct `core_id`s that don't match exactly |
+| `split_manifest.tsv` | `--split-selects` | One row per split file actually written: `original_file`, `split_file`, `block_number`, `total_blocks` -- the record of which now-deleted original each split file came from |
 
 ## Bad files
 

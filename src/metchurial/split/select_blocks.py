@@ -106,11 +106,15 @@ def write_split_files(path: str, text: str, all_tokens: list[Token],
     (already filtered to standalone SELECT blocks via select_block_ranges,
     in source order), writes "<stem>-NN<ext>" (zero-padded to at least 2
     digits) alongside the original, containing exactly that range's
-    chunk_source_text(...). Leaves the original file completely untouched.
-    No-op (returns []) if there's nothing to split apart -- zero blocks, or
-    exactly one (a lone SELECT block has nowhere else to go: writing a
-    "-01<ext>" copy would just duplicate the original under a new name) --
-    or if looks_like_split_output(path) is True."""
+    chunk_source_text(...). Once every split file is written, deletes the
+    original -- safe because the pre-split tree is expected to already be
+    preserved elsewhere (a separate copy of the scan root), so the split
+    files are the only copy that needs to live on disk going forward.
+    No-op (returns []), leaving the original in place, if there's nothing
+    to split apart -- zero blocks, or exactly one (a lone SELECT block has
+    nowhere else to go: writing a "-01<ext>" copy would just duplicate the
+    original under a new name) -- or if looks_like_split_output(path) is
+    True."""
     if len(ranges) <= 1 or looks_like_split_output(path):
         return []
     stem, ext = os.path.splitext(path)
@@ -121,4 +125,5 @@ def write_split_files(path: str, text: str, all_tokens: list[Token],
         with open(out_path, "w", encoding="utf-8") as f:
             f.write(chunk_source_text(text, all_tokens, start, end))
         written.append(out_path)
+    os.remove(path)
     return written

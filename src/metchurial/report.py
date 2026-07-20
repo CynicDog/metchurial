@@ -314,6 +314,11 @@ def _write_select_blocks(out: TextIO, select_block_counts: dict[str, int]) -> No
     for fpath in sorted(nonzero):
         out.write("| `{}` | {} |\n".format(md_escape(fpath), nonzero[fpath]))
     out.write("| **Total** | **{}** |\n\n".format(sum(nonzero.values())))
+    split_count = sum(1 for c in nonzero.values() if c > 1)
+    if split_count:
+        out.write("{} file(s) with 2+ blocks were split into per-block files and "
+                  "deleted -- see split_manifest.tsv for the full original-to-split "
+                  "mapping.\n\n".format(split_count))
 
 
 def write_markdown_report(path: str, run_info: dict[str, Any], tree: TreeScanResult, *,

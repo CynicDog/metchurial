@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 """Argparse CLI entry point: parses flags, drives scan_tree() over the
 given root, and writes every output artifact (summary.md, findings.tsv,
-strings.txt, stopwords.txt, known_names.txt, bad_files.txt, and the
---extract-metadata refs_*.tsv files) into the current working directory.
+strings.txt, stopwords.txt, known_names.txt, bad_files.txt, the
+--extract-metadata refs_*.tsv files, and the --split-selects
+split_manifest.tsv) into the current working directory.
 """
 
 from __future__ import annotations
@@ -48,6 +49,7 @@ FUNCTIONS_PATH = "refs_functions.tsv"
 RELATIONS_PATH = "refs_relations.tsv"
 QUERY_IDENTITY_PATH = "refs_query_identity.tsv"
 QUERY_SIMILARITY_PATH = "refs_query_similarity.tsv"
+SPLIT_MANIFEST_PATH = "split_manifest.tsv"
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -106,10 +108,13 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--split-selects", action="store_true",
                     help="Count standalone SELECT blocks per file (## Select Blocks "
                         "section in summary.md) and, when a file has 2+ blocks, write "
-                        "one <stem>-NN<ext> file per block alongside the original (a "
-                        "file with a single SELECT block is left as-is -- there's "
-                        "nothing to split apart). CTE bodies are never miscounted as "
-                        "their own block (default: off)")
+                        "one <stem>-NN<ext> file per block alongside the original, then "
+                        "delete the original (a file with a single SELECT block is left "
+                        "as-is -- there's nothing to split apart). split_manifest.tsv "
+                        "records, one row per split file, which original each came from. "
+                        "CTE bodies are never miscounted as their own block. Only safe "
+                        "to run against a tree you already have a separate copy of "
+                        "(default: off)")
     ap.add_argument("--mask-literals", action="store_true",
                     help="Rewrite in place each file with a finding: "
                         "every flagged literal's content is replaced with a fixed "
@@ -156,7 +161,8 @@ def main(argv: list[str] | None = None) -> None:
                       FUNCTIONS_PATH if args.extract_metadata else None,
                       RELATIONS_PATH if args.extract_metadata else None,
                       QUERY_IDENTITY_PATH if args.extract_metadata else None,
-                      QUERY_SIMILARITY_PATH if args.query_similarity else None) if p}
+                      QUERY_SIMILARITY_PATH if args.query_similarity else None,
+                      SPLIT_MANIFEST_PATH if args.split_selects else None) if p}
     exclude_paths |= set(previously_bad)
 
     common = dict(
@@ -239,6 +245,12 @@ def main(argv: list[str] | None = None) -> None:
         if args.query_similarity:
             query_identity_module.write_similarity_tsv(QUERY_SIMILARITY_PATH, query_similarity_rows)
 
+    if args.split_selects:
+        split_rows = sorted(tree.split_manifest, key=lambda r: (r.original_file, r.block_number))
+        write_refs_tsv(SPLIT_MANIFEST_PATH,
+                      ["original_file", "split_file", "block_number", "total_blocks"],
+                      split_rows)
+
     print("Scanned {} file(s) (.{}). Findings: {}".format(
         tree.file_count, ", .".join(args.extensions), len(tree.findings)))
     print("Summary        : {}".format(os.path.abspath(SUMMARY_PATH)))
@@ -260,10 +272,12 @@ def main(argv: list[str] | None = None) -> None:
     if args.query_similarity:
         print("Query similarity: {}".format(os.path.abspath(QUERY_SIMILARITY_PATH)))
     if args.split_selects:
+        split_files_written = sum(1 for c in tree.select_block_counts.values() if c > 1)
         print("Select blocks  : {} standalone SELECT block(s) across {} file(s), "
-             "split files written alongside originals for files with 2+ blocks".format(
+             "{} file(s) split and deleted -- see {}".format(
                  sum(tree.select_block_counts.values()),
-                 sum(1 for c in tree.select_block_counts.values() if c > 0)))
+                 sum(1 for c in tree.select_block_counts.values() if c > 0),
+                 split_files_written, os.path.abspath(SPLIT_MANIFEST_PATH)))
     if args.mask_literals:
         print("Masked files   : {} file(s) rewritten in place".format(
             len(masked_written)))

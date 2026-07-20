@@ -39,6 +39,7 @@ from metchurial.models.options import DEFAULT_SENSITIVE_COLUMNS, ScanOptions
 from metchurial.models.references import ColumnUse, FunctionCall, TableUse
 from metchurial.models.relations import RelationEdge
 from metchurial.models.results import FileScanResult, TreeScanResult
+from metchurial.models.split import SplitManifestRow
 from metchurial.models.tables import QueryBlock
 from metchurial.parsing.statement_driver import chunk_ranges, lex_file, parse_file
 from metchurial.references import query_identity, relations, table_scan
@@ -321,7 +322,13 @@ def _scan_file_body(path: str, text: str, enc: str, options: ScanOptions,
         ranges = chunk_ranges(all_tokens)
         blocks = select_blocks.select_block_ranges(all_tokens, ranges)
         result.select_block_count = len(blocks)
-        select_blocks.write_split_files(path, text, all_tokens, blocks)
+        written = select_blocks.write_split_files(path, text, all_tokens, blocks)
+        total = len(written)
+        result.split_manifest = [
+            SplitManifestRow(original_file=path, split_file=split_path,
+                             block_number=i, total_blocks=total)
+            for i, split_path in enumerate(written, 1)
+        ]
 
     return result
 
@@ -356,6 +363,7 @@ def _merge_result(tree: TreeScanResult, path: str, result: FileScanResult,
     tree.identity_rows.extend(result.identity_rows)
     if split_select:
         tree.select_block_counts[path] = result.select_block_count
+        tree.split_manifest.extend(result.split_manifest)
     if result.bad_reason is not None:
         tree.bad_files[path] = result.bad_reason
 

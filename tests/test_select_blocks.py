@@ -73,7 +73,7 @@ class TestChunkSourceText(unittest.TestCase):
 
 
 class TestWriteSplitFiles(unittest.TestCase):
-    def test_writes_one_file_per_block_leaves_original_untouched(self):
+    def test_writes_one_file_per_block_then_deletes_original(self):
         d = tempfile.mkdtemp()
         try:
             text = "SELECT * FROM t1;\nUPDATE t2 SET x=1;\nSELECT * FROM t3;\n"
@@ -89,8 +89,9 @@ class TestWriteSplitFiles(unittest.TestCase):
             self.assertTrue(os.path.basename(written[1]).startswith("sample-02"))
             with open(written[0], encoding="utf-8") as f:
                 self.assertEqual(f.read(), "SELECT * FROM t1;")
-            with open(path, encoding="utf-8") as f:
-                self.assertEqual(f.read(), text)  # original untouched
+            # original deleted once its split files exist -- the pre-split
+            # tree is expected to be preserved as a separate copy elsewhere.
+            self.assertFalse(os.path.exists(path))
         finally:
             import shutil
             shutil.rmtree(d)
@@ -98,7 +99,7 @@ class TestWriteSplitFiles(unittest.TestCase):
     def test_no_op_on_a_single_block(self):
         # A lone SELECT block has nowhere to be split apart from -- a
         # "-01.sql" copy would just duplicate the original under a new
-        # name, so write_split_files leaves it alone.
+        # name, so write_split_files leaves it (and the original) alone.
         d = tempfile.mkdtemp()
         try:
             text = "SELECT * FROM t1;\n"
@@ -112,6 +113,7 @@ class TestWriteSplitFiles(unittest.TestCase):
             written = sb.write_split_files(path, text, all_tokens, blocks)
             self.assertEqual(written, [])
             self.assertFalse(os.path.exists(os.path.join(d, "sample-01.sql")))
+            self.assertTrue(os.path.exists(path))  # original left in place
         finally:
             import shutil
             shutil.rmtree(d)
