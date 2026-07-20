@@ -333,18 +333,81 @@ def _scan_file_body(path: str, text: str, enc: str, options: ScanOptions,
     return result
 
 
-def _matching_files(root: str, suffixes: tuple[str, ...],
+# Common backup-file suffixes, stripped alongside `options.extensions`
+# itself when computing a file's identity for same-directory duplicate
+# detection (see _file_identity) -- lets a ".bak" copy's *embedded* real
+# extension (the ".sql" in "query1.sql.bak") also be peeled off, not just
+# the outermost suffix that made it match the scan filter in the first
+# place.
+_BACKUP_LIKE_EXTENSIONS = frozenset({
+    "bak", "backup", "bkup", "bk", "old", "orig", "save", "swp", "tmp",
+})
+
+
+def _file_identity(name: str, known_extensions: frozenset[str]) -> str:
+    """Canonical identity for same-directory duplicate detection: strips
+    trailing extensions one at a time as long as each one is either a
+    configured scan extension or a common backup suffix
+    (_BACKUP_LIKE_EXTENSIONS), so "query1.sql", "query1.sql.bak", and
+    "query1.bak" all reduce to "query1". Case-folded so a case-insensitive
+    filesystem (Windows/macOS default) doesn't split what's really one
+    group."""
+    stem = name
+    while True:
+        base, ext = os.path.splitext(stem)
+        if not base or ext[1:].lower() not in known_extensions:
+            return stem.lower()
+        stem = base
+
+
+def _dedupe_same_name_files(dirpath: str, names: list[str],
+                            known_extensions: frozenset[str]) -> list[str]:
+    """Collapses files that share a directory and an identity (see
+    _file_identity) down to one representative per distinct content --
+    "query1.sql" and a byte-for-byte-identical "query1.sql.bak" count as
+    one file for scanning purposes, matching human intuition that one is
+    just a backup copy of the other. A same-identity file whose content
+    actually differs (a stale or diverged backup, or a coincidentally
+    similar name) is kept as its own entry rather than silently dropped --
+    name alone is only ever a hint here, never sufficient on its own.
+    Among identical-content duplicates the shortest filename is kept, on
+    the assumption that the extra suffix marks the backup copy."""
+    groups: dict[str, list[str]] = {}
+    for name in names:
+        groups.setdefault(_file_identity(name, known_extensions), []).append(name)
+
+    kept = []
+    for group in groups.values():
+        if len(group) == 1:
+            kept.append(group[0])
+            continue
+        by_content: dict[str, str] = {}
+        for name in group:
+            try:
+                text, _enc = read_text(os.path.join(dirpath, name))
+            except OSError:
+                kept.append(name)  # let scan_file() surface the real error
+                continue
+            key = text.replace("\r\n", "\n").replace("\r", "\n").strip()
+            current = by_content.get(key)
+            if current is None or len(name) < len(current):
+                by_content[key] = name
+        kept.extend(by_content.values())
+    return kept
+
+
+def _matching_files(root: str, suffixes: tuple[str, ...], extensions: tuple[str, ...],
                     exclude_paths: set[str]) -> Iterator[str]:
+    known_extensions = (frozenset(e.lower().lstrip(".") for e in extensions)
+                        | _BACKUP_LIKE_EXTENSIONS)
     for dirpath, _dirnames, filenames in os.walk(root):
-        for name in filenames:
-            if not name.lower().endswith(suffixes):
-                continue
-            # A --split-select output file (e.g. report-01.sql) is scan
-            # output, not fresh input -- skip it, or a later scan of the
-            # same tree double-counts every split block under its own
-            # filename alongside the untouched original.
-            if select_blocks.looks_like_split_output(name):
-                continue
+        # A --split-select output file (e.g. report-01.sql) is scan
+        # output, not fresh input -- skip it, or a later scan of the same
+        # tree double-counts every split block under its own filename
+        # alongside the untouched original.
+        candidates = [name for name in filenames if name.lower().endswith(suffixes)
+                     and not select_blocks.looks_like_split_output(name)]
+        for name in _dedupe_same_name_files(dirpath, candidates, known_extensions):
             full = os.path.join(dirpath, name)
             if os.path.abspath(full) in exclude_paths:
                 continue
@@ -378,6 +441,14 @@ def scan_tree(root: str, options: ScanOptions | None = None, *,
     (detection inputs, opt-in extract_* analyses, worker count, resync
     cap); it's handed unchanged to every scan_file() call.
 
+    Same-directory files that share a name once backup-style extensions
+    are stripped (e.g. "query1.sql" and "query1.sql.bak", or a lone
+    "query1.bak") count as one file, not two -- see _file_identity /
+    _dedupe_same_name_files. Content is compared first: two same-named
+    files with genuinely different content (a diverged backup, or just a
+    naming coincidence) are both scanned, since the name match alone is
+    never enough evidence on its own that a duplicate is intended.
+
     `exclude_paths` is an optional set of absolute paths to skip -- keeps
     the scanner's own output files from being scanned if they happen to
     live inside the scanned tree.
@@ -402,7 +473,7 @@ def scan_tree(root: str, options: ScanOptions | None = None, *,
     exclude_paths = exclude_paths or set()
     tree = TreeScanResult()
 
-    files = list(_matching_files(root, suffixes, exclude_paths))
+    files = list(_matching_files(root, suffixes, options.extensions, exclude_paths))
     tree.file_count = len(files)
 
     if options.workers <= 1:

@@ -150,7 +150,7 @@ literals are sensitive or which unparseable files are safe to ignore.
 |---|---|---|
 | `root` (positional) | — | Directory to scan recursively |
 | `--sensitive-columns` | `ACCT_ID CTRT_NO ACCT_NM ACCT_NAME` | Column names sensitive-column comparison detection treats as sensitive; fully replaces the default list, doesn't add to it |
-| `--extensions` | `sql txt` | File extensions to scan, without the dot |
+| `--extensions` | `sql txt` | File extensions to scan, without the dot. Same-directory files that reduce to the same name once backup-style extensions are stripped (`query1.sql` / `query1.sql.bak`, or a lone `query1.bak`) count as one file, not two — unless their content actually differs, in which case both are scanned |
 | `--extract-metadata` | off | Also emit `refs_tables.tsv`/`refs_columns.tsv`/`refs_functions.tsv`/`refs_relations.tsv`/`refs_query_identity.tsv` (schema/table/column refs, JOIN relationships, function/predicate usage, per-statement structural identity) and matching summary.md sections — see [Output artifacts](#output-artifacts) |
 | `--query-similarity` | off | Also emit `refs_query_similarity.tsv`: pairwise Jaccard similarity between statements that don't share a `core_id`. Opt-in because the pass is O(n²) in the number of *distinct* core_ids — fine for thousands of distinct queries, slow for tens of thousands. Requires `--extract-metadata` |
 | `--split-selects` | off | For a file with 2+ standalone SELECT blocks, write one `<stem>-NN<ext>` file per block alongside the original, then delete the original and record the mapping in `split_manifest.tsv` (files with a single block are left as-is). Only safe to run against a tree you already have a separate copy of |

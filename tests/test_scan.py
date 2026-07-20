@@ -411,6 +411,54 @@ class TestMaskingEndToEnd(unittest.TestCase):
         self.assertEqual(once, twice)
 
 
+class TestSameNameDifferentExtensionDeduped(unittest.TestCase):
+    """A backup copy of a source file, kept alongside it under a different
+    extension (query1.sql / query1.sql.bak, or a lone query1.bak with no
+    ".sql" counterpart), must count as the same file for scanning purposes
+    -- not a second, independent one -- as long as its content actually
+    matches. A same-named file whose content has diverged is still scanned
+    as its own entry."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.d)
+
+    def _write(self, name, text):
+        with open(os.path.join(self.d, name), "w", encoding="utf-8") as f:
+            f.write(text)
+
+    def test_identical_bak_copy_of_sql_file_counts_once(self):
+        text = "SELECT * FROM t1 WHERE ACCT_ID = '1';"
+        self._write("query1.sql", text)
+        self._write("query1.sql.bak", text)
+        tree = scanner.scan_tree(self.d, ScanOptions(extensions=("sql", "bak")))
+        self.assertEqual(tree.file_count, 1)
+        self.assertEqual(len(tree.findings), 1)
+
+    def test_bare_bak_file_with_no_sql_sibling_counts_once(self):
+        text = "SELECT * FROM t1 WHERE ACCT_ID = '1';"
+        self._write("query1.bak", text)
+        tree = scanner.scan_tree(self.d, ScanOptions(extensions=("sql", "bak")))
+        self.assertEqual(tree.file_count, 1)
+        self.assertEqual(len(tree.findings), 1)
+
+    def test_diverged_bak_copy_is_scanned_separately(self):
+        self._write("query1.sql", "SELECT * FROM t1 WHERE ACCT_ID = '1';")
+        self._write("query1.sql.bak", "SELECT * FROM t1 WHERE ACCT_ID = '2';")
+        tree = scanner.scan_tree(self.d, ScanOptions(extensions=("sql", "bak")))
+        self.assertEqual(tree.file_count, 2)
+        self.assertEqual(len(tree.findings), 2)
+
+    def test_bak_extension_not_scanned_unless_requested(self):
+        text = "SELECT * FROM t1 WHERE ACCT_ID = '1';"
+        self._write("query1.sql", text)
+        self._write("query1.sql.bak", text)
+        tree = scanner.scan_tree(self.d, ScanOptions(extensions=("sql",)))
+        self.assertEqual(tree.file_count, 1)
+
+
 class TestSplitOutputNeverRescannedAsInput(unittest.TestCase):
     """A --split-select run leaves e.g. `report-01.sql` sitting alongside
     the original in the scanned tree -- a later scan of the same tree
