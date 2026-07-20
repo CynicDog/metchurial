@@ -31,7 +31,6 @@ BANNER = r""" __    __     ______     ______      ______     __  __     __  __  
 \ \ \-./\ \  \ \  __\   \/_/\ \/    \ \ \____  \ \  __ \  \ \ \_\ \  \ \  __<   \ \ \  \ \  __ \  \ \ \____
  \ \_\ \ \_\  \ \_____\    \ \_\     \ \_____\  \ \_\ \_\  \ \_____\  \ \_\ \_\  \ \_\  \ \_\ \_\  \ \_____\
   \/_/  \/_/   \/_____/     \/_/      \/_____/   \/_/\/_/   \/_____/   \/_/ /_/   \/_/   \/_/\/_/   \/_____/
-                                                                                            by @cynicdog
 """
 
 # Reserved output filenames -- not configurable, so a scan always produces
@@ -235,7 +234,7 @@ def main(argv: list[str] | None = None) -> None:
         identity_rows = sorted(tree.identity_rows, key=lambda r: (r.core_id, r.file, r.line or 0))
         write_refs_tsv(QUERY_IDENTITY_PATH,
                       ["core_id", "file", "line", "table_count", "join_count", "predicate_count",
-                       "columns"],
+                       "columns", "tables", "join_types", "relations", "predicates", "groupby"],
                       identity_rows)
         if args.query_similarity:
             query_identity_module.write_similarity_tsv(QUERY_SIMILARITY_PATH, query_similarity_rows)

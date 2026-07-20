@@ -11,9 +11,11 @@ from dataclasses import dataclass
 class IdentityRow:
     """One statement's structural identity. `fact_set` is the canonical
     fact strings the `core_id` hashes; it rides along for the corpus-wide
-    similarity pass and is never written to TSV directly. `columns` lists
-    every column the statement references (alias-resolved where possible)
-    -- supplementary reporting only, never part of the core_id."""
+    similarity pass and is never written to TSV directly. `columns`,
+    `tables`, `join_types`, `relations`, `predicates`, and `groupby` are
+    human-readable breakouts of that same fact_set by category (see
+    query_identity.build_identity_row) -- supplementary reporting only,
+    never read back to recompute the core_id."""
 
     core_id: str
     file: str
@@ -23,6 +25,11 @@ class IdentityRow:
     predicate_count: int
     fact_set: frozenset[str]
     columns: tuple[str, ...]
+    tables: tuple[str, ...]
+    join_types: tuple[str, ...]
+    relations: tuple[str, ...]
+    predicates: tuple[str, ...]
+    groupby: tuple[str, ...]
 
 
 @dataclass

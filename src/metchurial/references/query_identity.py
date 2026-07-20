@@ -242,12 +242,35 @@ def core_id_for(fact_set: frozenset[str]) -> str:
     return digest[:CORE_ID_LENGTH]
 
 
+def _facts_by_prefix(fact_set: frozenset[str], prefix: str) -> list[str]:
+    """Every fact string in a given category, prefix stripped, sorted."""
+    return sorted(f[len(prefix):] for f in fact_set if f.startswith(prefix))
+
+
+def _reformat_rel(stripped: str) -> str:
+    """A REL|-stripped fact is "op|a|b" (see _handle_comparison) --
+    rendered "a op b" for the TSV. table/col/op names never contain "|"
+    themselves, so a 3-way split is exact."""
+    op, a, b = stripped.split("|", 2)
+    return "{} {} {}".format(a, op, b)
+
+
+def _reformat_pred(stripped: str) -> str:
+    """A PRED|-stripped fact is "operand|op" (see _handle_single /
+    _handle_comparison) -- rendered "operand op" for the TSV. The operand
+    (a bare TABLE.COL or FN(TABLE.COL,...)) never contains "|"."""
+    operand, op = stripped.split("|", 1)
+    return "{} {}".format(operand, op)
+
+
 def build_identity_row(query_blocks: list[QueryBlock], predicate_visitor: _PredicateFactVisitor,
                        path: str, line: int | None) -> IdentityRow:
     """predicate_visitor: a _PredicateFactVisitor that has already visited
-    every committed fragment of this chunk. Its `columns` set rides along
-    as supplementary information only -- it never enters the fact set or
-    the core_id."""
+    every committed fragment of this chunk. Its `columns` set, and the
+    per-category fact breakouts below (`tables`/`join_types`/`relations`/
+    `predicates`/`groupby`), ride along as supplementary information only
+    -- human-readable views of `fact_set` for the TSV, never re-derived
+    into the core_id."""
     fact_set = build_fact_set(query_blocks, predicate_visitor.facts)
     return IdentityRow(
         core_id=core_id_for(fact_set), file=path, line=line,
@@ -256,6 +279,11 @@ def build_identity_row(query_blocks: list[QueryBlock], predicate_visitor: _Predi
         predicate_count=sum(1 for f in fact_set if f.startswith("PRED|")),
         fact_set=fact_set,
         columns=tuple(sorted(predicate_visitor.columns)),
+        tables=tuple(f.replace("|", ".") for f in _facts_by_prefix(fact_set, "TBL|")),
+        join_types=tuple(_facts_by_prefix(fact_set, "JOINTYPE|")),
+        relations=tuple(_reformat_rel(f) for f in _facts_by_prefix(fact_set, "REL|")),
+        predicates=tuple(_reformat_pred(f) for f in _facts_by_prefix(fact_set, "PRED|")),
+        groupby=tuple(_facts_by_prefix(fact_set, "GROUPBY|")),
     )
 
 
