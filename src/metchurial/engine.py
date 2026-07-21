@@ -329,7 +329,7 @@ def _scan_file_body(path: str, text: str, enc: str, options: ScanOptions,
         if written:
             known_extensions = (frozenset(e.lower().lstrip(".") for e in options.extensions)
                                 | _BACKUP_LIKE_EXTENSIONS)
-            _delete_backup_siblings(path, text, known_extensions)
+            _delete_backup_siblings(path, known_extensions)
         total = len(written)
         result.split_manifest = [
             SplitManifestRow(original_file=path, split_file=split_path,
@@ -367,21 +367,19 @@ def _file_identity(name: str, known_extensions: frozenset[str]) -> str:
         stem = base
 
 
-def _delete_backup_siblings(path: str, text: str, known_extensions: frozenset[str]) -> None:
-    """Called right after write_split_files has split `path` (whose content
-    is `text`) and deleted the original. Also deletes any same-directory,
-    same-identity backup copy (e.g. "query1.sql.bak" once "query1.sql" has
-    been split) whose content still matches `text` byte-for-byte (modulo
-    line endings). Left alone, such a backup wouldn't be caught by
+def _delete_backup_siblings(path: str, known_extensions: frozenset[str]) -> None:
+    """Called right after write_split_files has split `path` and deleted
+    the original. Also deletes any same-directory, same-identity sibling
+    (e.g. "query1.sql.bak" once "query1.sql" has been split) purely by
+    name -- no content comparison, matching _dedupe_same_name_files'
+    name-only rule below. Left alone, such a sibling wouldn't be caught by
     _dedupe_same_name_files on a later scan -- that only compares files
     present in the *same* run, and by the next run `path` itself is gone --
-    so the backup would look like fresh input and get split all over again
-    under its own name, duplicating content this run already captured. A
-    same-identity file whose content has actually diverged is left in
-    place, same as _dedupe_same_name_files would."""
+    so the sibling would look like fresh input and get split all over
+    again under its own name, duplicating content this run already
+    captured."""
     dirpath = os.path.dirname(path) or "."
     target_identity = _file_identity(os.path.basename(path), known_extensions)
-    normalized = text.replace("\r\n", "\n").replace("\r", "\n").strip()
     try:
         siblings = os.listdir(dirpath)
     except OSError:
@@ -391,50 +389,24 @@ def _delete_backup_siblings(path: str, text: str, known_extensions: frozenset[st
         if full == path or _file_identity(name, known_extensions) != target_identity:
             continue
         try:
-            sib_text, _enc = read_text(full)
+            os.remove(full)
         except OSError:
-            continue
-        if sib_text.replace("\r\n", "\n").replace("\r", "\n").strip() == normalized:
-            try:
-                os.remove(full)
-            except OSError:
-                pass
+            pass
 
 
-def _dedupe_same_name_files(dirpath: str, names: list[str],
-                            known_extensions: frozenset[str]) -> list[str]:
+def _dedupe_same_name_files(names: list[str], known_extensions: frozenset[str]) -> list[str]:
     """Collapses files that share a directory and an identity (see
-    _file_identity) down to one representative per distinct content --
-    "query1.sql" and a byte-for-byte-identical "query1.sql.bak" count as
-    one file for scanning purposes, matching human intuition that one is
-    just a backup copy of the other. A same-identity file whose content
-    actually differs (a stale or diverged backup, or a coincidentally
-    similar name) is kept as its own entry rather than silently dropped --
-    name alone is only ever a hint here, never sufficient on its own.
-    Among identical-content duplicates the shortest filename is kept, on
-    the assumption that the extra suffix marks the backup copy."""
+    _file_identity) down to one representative, purely by name -- no
+    content comparison. "query1.sql" and "query1.sql.bak" (or a lone
+    "query1.bak") are always treated as the same file for scanning
+    purposes, on the assumption that a backup-suffixed sibling is always
+    just a copy (stale or otherwise) of the real file, never independent
+    data. Among same-identity names the shortest is kept, on the
+    assumption that the extra suffix marks the backup copy."""
     groups: dict[str, list[str]] = {}
     for name in names:
         groups.setdefault(_file_identity(name, known_extensions), []).append(name)
-
-    kept = []
-    for group in groups.values():
-        if len(group) == 1:
-            kept.append(group[0])
-            continue
-        by_content: dict[str, str] = {}
-        for name in group:
-            try:
-                text, _enc = read_text(os.path.join(dirpath, name))
-            except OSError:
-                kept.append(name)  # let scan_file() surface the real error
-                continue
-            key = text.replace("\r\n", "\n").replace("\r", "\n").strip()
-            current = by_content.get(key)
-            if current is None or len(name) < len(current):
-                by_content[key] = name
-        kept.extend(by_content.values())
-    return kept
+    return [min(group, key=lambda n: (len(n), n)) for group in groups.values()]
 
 
 def _matching_files(root: str, suffixes: tuple[str, ...], extensions: tuple[str, ...],
@@ -448,7 +420,7 @@ def _matching_files(root: str, suffixes: tuple[str, ...], extensions: tuple[str,
         # alongside the untouched original.
         candidates = [name for name in filenames if name.lower().endswith(suffixes)
                      and not select_blocks.looks_like_split_output(name)]
-        for name in _dedupe_same_name_files(dirpath, candidates, known_extensions):
+        for name in _dedupe_same_name_files(candidates, known_extensions):
             full = os.path.join(dirpath, name)
             if os.path.abspath(full) in exclude_paths:
                 continue
@@ -485,10 +457,11 @@ def scan_tree(root: str, options: ScanOptions | None = None, *,
     Same-directory files that share a name once backup-style extensions
     are stripped (e.g. "query1.sql" and "query1.sql.bak", or a lone
     "query1.bak") count as one file, not two -- see _file_identity /
-    _dedupe_same_name_files. Content is compared first: two same-named
-    files with genuinely different content (a diverged backup, or just a
-    naming coincidence) are both scanned, since the name match alone is
-    never enough evidence on its own that a duplicate is intended.
+    _dedupe_same_name_files. This is purely name-based, no content
+    comparison: a same-identity sibling is always assumed to be a copy of
+    the real file, so only one representative is ever scanned (and, under
+    --split-selects, any same-identity sibling left over after a split is
+    deleted too -- see _delete_backup_siblings).
 
     `exclude_paths` is an optional set of absolute paths to skip -- keeps
     the scanner's own output files from being scanned if they happen to

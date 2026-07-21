@@ -415,9 +415,10 @@ class TestSameNameDifferentExtensionDeduped(unittest.TestCase):
     """A backup copy of a source file, kept alongside it under a different
     extension (query1.sql / query1.sql.bak, or a lone query1.bak with no
     ".sql" counterpart), must count as the same file for scanning purposes
-    -- not a second, independent one -- as long as its content actually
-    matches. A same-named file whose content has diverged is still scanned
-    as its own entry."""
+    -- not a second, independent one. This is purely name-based: a
+    same-identity sibling is dropped regardless of whether its content
+    actually still matches, since a diverged backup is still just a
+    backup, not independent data worth double-scanning."""
 
     def setUp(self):
         self.d = tempfile.mkdtemp()
@@ -444,12 +445,12 @@ class TestSameNameDifferentExtensionDeduped(unittest.TestCase):
         self.assertEqual(tree.file_count, 1)
         self.assertEqual(len(tree.findings), 1)
 
-    def test_diverged_bak_copy_is_scanned_separately(self):
+    def test_diverged_bak_copy_is_still_collapsed_by_name_alone(self):
         self._write("query1.sql", "SELECT * FROM t1 WHERE ACCT_ID = '1';")
         self._write("query1.sql.bak", "SELECT * FROM t1 WHERE ACCT_ID = '2';")
         tree = scanner.scan_tree(self.d, ScanOptions(extensions=("sql", "bak")))
-        self.assertEqual(tree.file_count, 2)
-        self.assertEqual(len(tree.findings), 2)
+        self.assertEqual(tree.file_count, 1)
+        self.assertEqual(len(tree.findings), 1)
 
     def test_bak_extension_not_scanned_unless_requested(self):
         text = "SELECT * FROM t1 WHERE ACCT_ID = '1';"
@@ -484,11 +485,12 @@ class TestSplitOutputNeverRescannedAsInput(unittest.TestCase):
 
 
 class TestSplitDeletesMatchingBackupSiblings(unittest.TestCase):
-    """A .bak copy identical to a file that --split-selects just split
-    (and deleted) must be deleted too -- otherwise it survives untouched
-    into a later scan, where it's no longer deduped against anything (the
-    original is gone) and gets split all over again under its own name,
-    duplicating content the first run already captured."""
+    """A .bak sibling of a file that --split-selects just split (and
+    deleted) must be deleted too, purely by name -- no content comparison
+    -- otherwise it survives untouched into a later scan, where it's no
+    longer deduped against anything (the original is gone) and gets split
+    all over again under its own name, duplicating content the first run
+    already captured."""
 
     def setUp(self):
         self.d = tempfile.mkdtemp()
@@ -516,15 +518,16 @@ class TestSplitDeletesMatchingBackupSiblings(unittest.TestCase):
         tree2 = scanner.scan_tree(self.d, options)
         self.assertEqual(tree2.file_count, 0)
 
-    def test_diverged_bak_sibling_survives_and_is_split_on_its_own(self):
+    def test_diverged_bak_sibling_deleted_too_by_name_alone(self):
         self._write("query1.sql", self.text)
         self._write("query1.sql.bak", "SELECT c FROM t3 WHERE x = 1; SELECT d FROM t4;")
         options = ScanOptions(extensions=("sql", "bak"), split_selects=True)
         tree = scanner.scan_tree(self.d, options)
-        self.assertEqual(tree.file_count, 2)
+        self.assertEqual(tree.file_count, 1)
         remaining = set(os.listdir(self.d))
         self.assertIn("query1-01.sql", remaining)
-        self.assertIn("query1.sql-01.bak", remaining)
+        self.assertIn("query1-02.sql", remaining)
+        self.assertNotIn("query1.sql.bak", remaining)
 
 
 if __name__ == "__main__":
