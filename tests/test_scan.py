@@ -483,5 +483,49 @@ class TestSplitOutputNeverRescannedAsInput(unittest.TestCase):
         self.assertEqual(len(tree.findings), 1)
 
 
+class TestSplitDeletesMatchingBackupSiblings(unittest.TestCase):
+    """A .bak copy identical to a file that --split-selects just split
+    (and deleted) must be deleted too -- otherwise it survives untouched
+    into a later scan, where it's no longer deduped against anything (the
+    original is gone) and gets split all over again under its own name,
+    duplicating content the first run already captured."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.text = "SELECT a FROM t1; SELECT b FROM t2;"
+
+    def tearDown(self):
+        shutil.rmtree(self.d)
+
+    def _write(self, name, text):
+        with open(os.path.join(self.d, name), "w", encoding="utf-8") as f:
+            f.write(text)
+
+    def test_identical_bak_sibling_deleted_alongside_split_original(self):
+        self._write("query1.sql", self.text)
+        self._write("query1.sql.bak", self.text)
+        options = ScanOptions(extensions=("sql", "bak"), split_selects=True)
+        scanner.scan_tree(self.d, options)
+        remaining = set(os.listdir(self.d))
+        self.assertNotIn("query1.sql.bak", remaining)
+        self.assertNotIn("query1.sql", remaining)
+        self.assertIn("query1-01.sql", remaining)
+        self.assertIn("query1-02.sql", remaining)
+
+        # A later scan of the same tree finds nothing left to (re-)split.
+        tree2 = scanner.scan_tree(self.d, options)
+        self.assertEqual(tree2.file_count, 0)
+
+    def test_diverged_bak_sibling_survives_and_is_split_on_its_own(self):
+        self._write("query1.sql", self.text)
+        self._write("query1.sql.bak", "SELECT c FROM t3 WHERE x = 1; SELECT d FROM t4;")
+        options = ScanOptions(extensions=("sql", "bak"), split_selects=True)
+        tree = scanner.scan_tree(self.d, options)
+        self.assertEqual(tree.file_count, 2)
+        remaining = set(os.listdir(self.d))
+        self.assertIn("query1-01.sql", remaining)
+        self.assertIn("query1.sql-01.bak", remaining)
+
+
 if __name__ == "__main__":
     unittest.main()

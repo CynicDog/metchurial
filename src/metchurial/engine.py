@@ -326,6 +326,10 @@ def _scan_file_body(path: str, text: str, enc: str, options: ScanOptions,
         blocks = select_blocks.select_block_ranges(all_tokens, ranges)
         result.select_block_count = len(blocks)
         written = select_blocks.write_split_files(path, text, all_tokens, blocks)
+        if written:
+            known_extensions = (frozenset(e.lower().lstrip(".") for e in options.extensions)
+                                | _BACKUP_LIKE_EXTENSIONS)
+            _delete_backup_siblings(path, text, known_extensions)
         total = len(written)
         result.split_manifest = [
             SplitManifestRow(original_file=path, split_file=split_path,
@@ -361,6 +365,40 @@ def _file_identity(name: str, known_extensions: frozenset[str]) -> str:
         if not base or ext[1:].lower() not in known_extensions:
             return stem.lower()
         stem = base
+
+
+def _delete_backup_siblings(path: str, text: str, known_extensions: frozenset[str]) -> None:
+    """Called right after write_split_files has split `path` (whose content
+    is `text`) and deleted the original. Also deletes any same-directory,
+    same-identity backup copy (e.g. "query1.sql.bak" once "query1.sql" has
+    been split) whose content still matches `text` byte-for-byte (modulo
+    line endings). Left alone, such a backup wouldn't be caught by
+    _dedupe_same_name_files on a later scan -- that only compares files
+    present in the *same* run, and by the next run `path` itself is gone --
+    so the backup would look like fresh input and get split all over again
+    under its own name, duplicating content this run already captured. A
+    same-identity file whose content has actually diverged is left in
+    place, same as _dedupe_same_name_files would."""
+    dirpath = os.path.dirname(path) or "."
+    target_identity = _file_identity(os.path.basename(path), known_extensions)
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n").strip()
+    try:
+        siblings = os.listdir(dirpath)
+    except OSError:
+        return
+    for name in siblings:
+        full = os.path.join(dirpath, name)
+        if full == path or _file_identity(name, known_extensions) != target_identity:
+            continue
+        try:
+            sib_text, _enc = read_text(full)
+        except OSError:
+            continue
+        if sib_text.replace("\r\n", "\n").replace("\r", "\n").strip() == normalized:
+            try:
+                os.remove(full)
+            except OSError:
+                pass
 
 
 def _dedupe_same_name_files(dirpath: str, names: list[str],
