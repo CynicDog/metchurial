@@ -12,10 +12,20 @@ Signature contents (canonical fact strings, one set per statement):
   (pair-sorted), from ON clauses and comma-join WHERE equalities alike
 * ``PRED|operand|op``        -- a WHERE filter predicate's operand
   signature and operator (comparison/BETWEEN/LIKE/IS [NOT] NULL/IN); the
-  operand is ``table.col`` or ``FN(table.col,...)`` (function name plus
-  resolvable column arguments -- literal values are always excluded)
+  operand is ``table.col`` for a resolvable qualified column, a bare
+  column's own name if unqualified, or ``FN(...)`` over either shape of
+  its column arguments (function name plus column inputs -- literal
+  arguments are always excluded)
 * ``GROUPBY|operand``        -- each GROUP BY item, same operand
   signature (a bare unqualified column keeps its own name)
+* ``SHAPE|BLOCKS=n``         -- total query-block count for the statement
+  (the outer block plus every CTE body and derived-table subquery,
+  table_scan.scan_query_blocks' own count). Without this, a statement that
+  only wraps another query -- `WITH cte AS (<q>) SELECT * FROM cte` or
+  `SELECT * FROM (<q>) x` with no join/predicate/grouping of its own --
+  contributes zero TBL/JOINTYPE/REL/PRED/GROUPBY facts beyond `<q>`'s own,
+  so it collapsed onto the bare statement `<q>` in another file even
+  though one is a CTE/subquery wrapper and the other is not.
 
 Statements that differ only in SELECT-list projection, column aliasing,
 derived-column arithmetic, table aliases, formatting, comments, literal
@@ -25,11 +35,16 @@ All facts come from the parse tree and the token-scan (table_scan.py)
 with aliases resolved to real table names -- never from normalizing SQL
 text.
 
-Each identity row also carries a supplementary ``columns`` field -- every
-column the statement references, alias-resolved where possible. It is
-reporting-only and never enters the core_id: without table layout
+Each identity row also carries supplementary reporting-only fields, never
+read back into the core_id: ``columns`` (every column the statement
+references, alias-resolved where possible -- without table layout
 information a ``SELECT *`` cannot be resolved to columns, so column sets
-are not reliable identity evidence.
+are not reliable identity evidence) and ``has_cte``/``has_subquery``/
+``has_union`` (whether the statement's shape includes a WITH clause, a
+derived-table/scalar/IN/EXISTS subquery, or a UNION/INTERSECT/EXCEPT --
+SHAPE|BLOCKS above is what actually keeps these from collapsing a
+wrapper statement onto the bare query it wraps; these three just surface
+that shape in refs_query_identity.tsv).
 
 Known limitations, each pinned by tests/test_query_identity_complex.py:
 
@@ -38,6 +53,13 @@ Known limitations, each pinned by tests/test_query_identity_complex.py:
 * A correlated subquery's reference to an outer alias doesn't resolve
   (scoping is per query block), so a JOIN and its correlated-EXISTS
   rewrite deliberately get different signatures.
+* `has_subquery` is read off the parse tree (fullselect_in_parentheses/
+  nested_table_reference), so it can under-report on a statement that
+  doesn't parse as one clean tree -- e.g. a reserved-keyword-colliding
+  alias elsewhere in the same statement (see TestReservedKeywordCteNames).
+  `has_cte`/`has_union` don't share this weakness: they're read straight
+  off the token stream (table_scan.find_cte_names/has_set_operator), no
+  parse tree required.
 
 Statements that don't share a core_id get a corpus-wide Jaccard
 similarity score over each distinct core_id's representative fact set
@@ -85,19 +107,31 @@ def _resolve_field_reference(expr_ctx: Any,
     return (table, col)
 
 
+def _bare_column_operand(expr_ctx: Any) -> str | None:
+    """`expr_ctx`'s own unqualified column_name text, upper-cased, if it is
+    one -- the same fallback visitGrouping_expression already applies to a
+    bare GROUP BY item ("a bare unqualified column keeps its own name"),
+    reused here so an unqualified predicate operand (`WHERE mycol = 1`) or
+    function argument (`SUBSTR(mycol, 1, 6)`) doesn't silently vanish just
+    because it carries no table/alias qualifier to resolve."""
+    col = expr_ctx.column_name()
+    return col.getText().upper() if col is not None else None
+
+
 def _operand_signature(expr_ctx: Any, query_blocks: list[QueryBlock]) -> str | None:
     """Canonical, alias- and literal-independent signature of a predicate
     operand or GROUP BY item: ``TABLE.COL`` for a resolvable qualified
-    column, ``FN(TABLE.COL,...)`` for a function call over its resolvable
-    column arguments (literals and unresolvable arguments are dropped, so
-    ``COUNT(*)`` becomes ``COUNT()`` and only the function name and its
-    column inputs discriminate), else None."""
+    column, the column's own name if unqualified, ``FN(...)`` for a
+    function call over its column arguments in either shape (literals and
+    unresolvable arguments are dropped, so ``COUNT(*)`` becomes
+    ``COUNT()`` and only the function name and its column inputs
+    discriminate), else None."""
     resolved = _resolve_field_reference(expr_ctx, query_blocks)
     if resolved is not None:
         return "{}.{}".format(*resolved)
     fn = expr_ctx.function_invocation()
     if fn is None:
-        return None
+        return _bare_column_operand(expr_ctx)
     name = fn.function_name().getText().upper()
     cols = []
     if fn.arg_list() is not None:
@@ -108,6 +142,10 @@ def _operand_signature(expr_ctx: Any, query_blocks: list[QueryBlock]) -> str | N
             r = _resolve_field_reference(arg_expr, query_blocks)
             if r is not None:
                 cols.append("{}.{}".format(*r))
+            else:
+                bare = _bare_column_operand(arg_expr)
+                if bare is not None:
+                    cols.append(bare)
     return "{}({})".format(name, ",".join(cols))
 
 
@@ -128,6 +166,39 @@ class _PredicateFactVisitor(Db2ParserVisitor):
         # the signature, since SELECT * is unresolvable without table
         # layout information.
         self.columns: set[str] = set()
+        # has_subquery -- a supplementary TSV column only, never part of
+        # the signature (SHAPE|BLOCKS in build_fact_set already keeps a
+        # CTE/subquery/UNION statement from collapsing onto the bare query
+        # it wraps; this just makes that shape visible in the report).
+        # has_cte/has_union are siblings of this flag but live outside this
+        # visitor (build_identity_row derives them straight from
+        # table_scan's token-scan -- see its own docstring for why).
+        # has_subquery is read off the grammar instead: a CTE body's own
+        # parens are written inline in common_table_expression's rule
+        # (`AS '(' fullselect ')'`), never through the fullselect_in_
+        # parentheses subrule a derived table or a scalar/IN/EXISTS/ANY/
+        # ALL subquery goes through -- so the two can never be confused by
+        # construction. The trade-off: like every other fact this visitor
+        # collects, it only sees committed (successfully parsed) fragments
+        # -- a statement that fails to parse as one clean tree (e.g. a
+        # reserved-keyword-colliding alias elsewhere in it, see
+        # TestReservedKeywordCteNames) can under-report a real subquery,
+        # unlike has_cte/has_union's token-scan, which doesn't need a
+        # parse tree at all.
+        self.has_subquery = False
+
+    def visitFullselect_in_parentheses(
+            self, ctx: Db2Parser.Fullselect_in_parenthesesContext) -> Any:
+        self.has_subquery = True
+        return self.visitChildren(ctx)
+
+    def visitNested_table_reference(self, ctx: Db2Parser.Nested_table_referenceContext) -> Any:
+        # A derived table (`FROM (SELECT ...) x`) embeds its own
+        # '(' fullselect ')' directly, the same way common_table_expression
+        # does -- it doesn't go through fullselect_in_parentheses either,
+        # so it needs its own hook.
+        self.has_subquery = True
+        return self.visitChildren(ctx)
 
     def visitPredicate(self, ctx: Db2Parser.PredicateContext) -> Any:
         op = classify_predicate(ctx)
@@ -231,6 +302,7 @@ def build_fact_set(query_blocks: list[QueryBlock],
         facts.add("TBL|{}|{}".format(ref.schema, ref.table))
     facts |= _join_type_facts(query_blocks)
     facts |= predicate_facts
+    facts.add("SHAPE|BLOCKS={}".format(len(query_blocks)))
     return frozenset(facts)
 
 
@@ -264,19 +336,29 @@ def _reformat_pred(stripped: str) -> str:
 
 
 def build_identity_row(query_blocks: list[QueryBlock], predicate_visitor: _PredicateFactVisitor,
-                       path: str, line: int | None) -> IdentityRow:
+                       path: str, line: int | None, tokens: list[Any]) -> IdentityRow:
     """predicate_visitor: a _PredicateFactVisitor that has already visited
-    every committed fragment of this chunk. Its `columns` set, and the
-    per-category fact breakouts below (`tables`/`join_types`/`relations`/
-    `predicates`/`groupby`), ride along as supplementary information only
-    -- human-readable views of `fact_set` for the TSV, never re-derived
-    into the core_id."""
+    every committed fragment of this chunk. Its `columns` set, its
+    `has_subquery` flag, and the per-category fact breakouts below
+    (`tables`/`join_types`/`relations`/`predicates`/`groupby`), ride along
+    as supplementary information only -- human-readable views of
+    `fact_set` for the TSV, never re-derived into the core_id.
+
+    `tokens`: this chunk's own token slice (same one scan_query_blocks(tokens)
+    was built from) -- `has_cte`/`has_union` are read straight off it via
+    table_scan's token-scan (find_cte_names/has_set_operator), not off the
+    parse tree, so they stay accurate even when this chunk doesn't parse
+    as one clean tree (see _PredicateFactVisitor.has_subquery's own
+    docstring for why that's not equally true of `has_subquery`)."""
     fact_set = build_fact_set(query_blocks, predicate_visitor.facts)
     return IdentityRow(
         core_id=core_id_for(fact_set), file=path, line=line,
         table_count=sum(1 for f in fact_set if f.startswith("TBL|")),
         join_count=sum(1 for f in fact_set if f.startswith("REL|")),
         predicate_count=sum(1 for f in fact_set if f.startswith("PRED|")),
+        has_cte=bool(table_scan.find_cte_names(tokens)),
+        has_subquery=predicate_visitor.has_subquery,
+        has_union=table_scan.has_set_operator(tokens),
         fact_set=fact_set,
         columns=tuple(sorted(predicate_visitor.columns)),
         tables=tuple(f.replace("|", ".") for f in _facts_by_prefix(fact_set, "TBL|")),

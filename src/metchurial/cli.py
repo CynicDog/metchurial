@@ -240,6 +240,7 @@ def main(argv: list[str] | None = None) -> None:
         identity_rows = sorted(tree.identity_rows, key=lambda r: (r.core_id, r.file, r.line or 0))
         write_refs_tsv(QUERY_IDENTITY_PATH,
                       ["core_id", "file", "line", "table_count", "join_count", "predicate_count",
+                       "has_cte", "has_subquery", "has_union",
                        "columns", "tables", "join_types", "relations", "predicates", "groupby"],
                       identity_rows)
         if args.query_similarity:

@@ -153,13 +153,15 @@ def _scan_file_body(path: str, text: str, enc: str, options: ScanOptions,
     stopwords = options.stopwords
     known_names = options.known_names
     result = FileScanResult()
-    # One (query_blocks, predicate_visitor, line) tuple per chunk, appended
-    # inside pre_chunk_hook -- can only be turned into final IdentityRows
-    # *after* parse_file() returns for the whole file, since a chunk's
-    # predicate_visitor keeps accumulating across however many times the
-    # tiered driver calls .visit() on that chunk's own committed fragments
-    # (see query_identity.py's module docstring).
-    query_identity_chunks: list[tuple[list[QueryBlock], Any, int | None]] = []
+    # One (query_blocks, predicate_visitor, line, tokens) tuple per chunk,
+    # appended inside pre_chunk_hook -- can only be turned into final
+    # IdentityRows *after* parse_file() returns for the whole file, since a
+    # chunk's predicate_visitor keeps accumulating across however many
+    # times the tiered driver calls .visit() on that chunk's own committed
+    # fragments (see query_identity.py's module docstring). `tokens` is the
+    # chunk's own token slice, kept around so has_cte/has_union can be read
+    # off it directly (table_scan's token-scan) rather than the parse tree.
+    query_identity_chunks: list[tuple[list[QueryBlock], Any, int | None, list[Token]]] = []
     lines = text.splitlines()
     seen_hit_lines: set[int] = set()
 
@@ -201,13 +203,14 @@ def _scan_file_body(path: str, text: str, enc: str, options: ScanOptions,
             extra_visitors.append(FunctionVisitor(text, fn_sink))
         if not need_blocks:
             return tuple(extra_visitors)
-        blocks = table_scan.scan_query_blocks(all_tokens[start:end])
+        chunk_tokens = all_tokens[start:end]
+        blocks = table_scan.scan_query_blocks(chunk_tokens)
         if options.extract_query_identity:
             predicate_visitor = query_identity.new_predicate_visitor(blocks)
             extra_visitors.append(predicate_visitor)
             chunk_line = next(
-                (t.line for t in all_tokens[start:end] if t.channel == Token.DEFAULT_CHANNEL), None)
-            query_identity_chunks.append((blocks, predicate_visitor, chunk_line))
+                (t.line for t in chunk_tokens if t.channel == Token.DEFAULT_CHANNEL), None)
+            query_identity_chunks.append((blocks, predicate_visitor, chunk_line, chunk_tokens))
         if options.extract_table_refs:
             for tref in table_scan.iter_table_refs(blocks):
                 result.table_uses.append(
@@ -276,8 +279,8 @@ def _scan_file_body(path: str, text: str, enc: str, options: ScanOptions,
     # have -- every file's trailing empty chunk would otherwise share the
     # same degenerate empty-fact-set core_id, falsely "clustering" every
     # scanned file together.
-    for blocks, predicate_visitor, line in query_identity_chunks:
-        row = query_identity.build_identity_row(blocks, predicate_visitor, path, line)
+    for blocks, predicate_visitor, line, tokens in query_identity_chunks:
+        row = query_identity.build_identity_row(blocks, predicate_visitor, path, line, tokens)
         if row.table_count or row.join_count or row.predicate_count:
             result.identity_rows.append(row)
 

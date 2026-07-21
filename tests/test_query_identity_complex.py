@@ -135,6 +135,113 @@ class TestReservedKeywordCteNames(unittest.TestCase):
         self.assertNotEqual(_core_id(CTE_BASE), _core_id(changed))
 
 
+class TestWrapperDoesNotCollapseOntoBareQuery(unittest.TestCase):
+    """A statement that only wraps another query in a CTE or a derived-
+    table subquery -- `WITH cte AS (<q>) SELECT * FROM cte` or
+    `SELECT * FROM (<q>) x` -- adds no join/predicate/grouping fact of its
+    own, so its fact_set used to be exactly `<q>`'s own fact_set. That
+    silently merged two structurally different statements (living in two
+    different .sql files, e.g. one file holding the whole CTE query and
+    another holding just the shared SELECT it wraps) onto one core_id.
+    SHAPE|BLOCKS=n (the query-block count) now discriminates a wrapper
+    from the bare query it wraps, while still collapsing cosmetic-only
+    differences between two wrappers of the same shape."""
+
+    BARE = "SELECT a.id, a.amt FROM tbord a WHERE a.st = 'A';"
+    CTE_WRAPPED = ("WITH base AS (SELECT a.id, a.amt FROM tbord a WHERE a.st = 'A') "
+                  "SELECT * FROM base;")
+    SUBQUERY_WRAPPED = ("SELECT s.id, s.amt FROM "
+                       "(SELECT a.id, a.amt FROM tbord a WHERE a.st = 'A') s;")
+    # UNION'd with itself -- same tables/predicate as BARE on both
+    # branches, so TBL/PRED alone don't discriminate it from BARE either;
+    # only SHAPE|BLOCKS (2 query blocks, one per branch, vs BARE's 1) does.
+    UNION_WRAPPED = ("SELECT a.id, a.amt FROM tbord a WHERE a.st = 'A' "
+                    "UNION "
+                    "SELECT a.id, a.amt FROM tbord a WHERE a.st = 'A';")
+
+    def test_cte_wrapper_does_not_match_the_bare_query_it_wraps(self):
+        # Two separate .sql files: one holding the whole `WITH ... SELECT
+        # * FROM base` statement, the other holding just the SELECT its
+        # CTE body wraps -- these must not canonicalize to the same
+        # core_id, even though the CTE body's own facts are identical.
+        self.assertNotEqual(_core_id(self.CTE_WRAPPED), _core_id(self.BARE))
+
+    def test_subquery_wrapper_does_not_match_the_bare_query_it_wraps(self):
+        self.assertNotEqual(_core_id(self.SUBQUERY_WRAPPED), _core_id(self.BARE))
+
+    def test_union_wrapper_does_not_match_the_bare_query_it_wraps(self):
+        # A UNION of two branches (even two copies of the same branch) is
+        # a genuinely different query from either branch alone -- UNION
+        # dedups rows, UNION ALL doubles them; neither is equivalent to
+        # running just one branch. Must not canonicalize onto BARE.
+        self.assertNotEqual(_core_id(self.UNION_WRAPPED), _core_id(self.BARE))
+
+    def test_cte_wrapper_alias_rename_still_collapses(self):
+        renamed = (self.CTE_WRAPPED.replace("base", "cte2").replace("tbord a", "tbord x")
+                  .replace("a.", "x."))
+        self.assertEqual(_core_id(self.CTE_WRAPPED), _core_id(renamed))
+
+
+class TestStatementShapeFlags(unittest.TestCase):
+    """has_cte/has_subquery/has_union: supplementary refs_query_identity.tsv
+    columns surfacing whether a statement wraps a CTE, a derived-table/
+    scalar/IN/EXISTS subquery, or a UNION/INTERSECT/EXCEPT -- reporting
+    only, never part of the core_id (SHAPE|BLOCKS already handles that,
+    see TestWrapperDoesNotCollapseOntoBareQuery)."""
+
+    def _flags(self, sql):
+        row = _identity_rows(sql)[0]
+        return row.has_cte, row.has_subquery, row.has_union
+
+    def test_bare_query_has_no_shape_flags_set(self):
+        sql = "SELECT a.id, a.amt FROM tbord a WHERE a.st = 'A';"
+        self.assertEqual(self._flags(sql), (False, False, False))
+
+    def test_cte_wrapper_sets_has_cte_only(self):
+        sql = "WITH mycte AS (SELECT a.id FROM tbord a) SELECT * FROM mycte;"
+        self.assertEqual(self._flags(sql), (True, False, False))
+
+    def test_derived_table_sets_has_subquery_only(self):
+        sql = "SELECT dv.id FROM (SELECT a.id FROM tbord a) dv;"
+        self.assertEqual(self._flags(sql), (False, True, False))
+
+    def test_exists_subquery_sets_has_subquery_only(self):
+        sql = ("SELECT a.id FROM tbord a "
+              "WHERE EXISTS (SELECT 1 FROM tbitem b WHERE b.ord_id = a.id);")
+        self.assertEqual(self._flags(sql), (False, True, False))
+
+    def test_union_sets_has_union_only(self):
+        sql = ("SELECT a.id FROM tbord a WHERE a.st = 'A' "
+              "UNION SELECT a.id FROM tbord a WHERE a.st = 'B';")
+        self.assertEqual(self._flags(sql), (False, False, True))
+
+    def test_union_inside_a_cte_body_sets_both_flags(self):
+        sql = ("WITH mycte AS (SELECT a.id FROM tbord a UNION SELECT a.id FROM tbord a) "
+              "SELECT * FROM mycte;")
+        self.assertEqual(self._flags(sql), (True, False, True))
+
+    def test_has_cte_is_robust_to_a_reserved_keyword_cte_name(self):
+        # has_cte/has_union are read off the token stream, not the parse
+        # tree, so a CTE named "base" (a reserved keyword that keeps this
+        # statement from parsing as one clean tree, per
+        # TestReservedKeywordCteNames) still sets has_cte correctly.
+        sql = "WITH base AS (SELECT a.id FROM tbord a) SELECT * FROM base;"
+        self.assertTrue(_identity_rows(sql)[0].has_cte)
+
+    def test_has_subquery_can_under_report_on_a_reserved_keyword_alias(self):
+        # Documented limitation (see query_identity.py's module docstring
+        # and _PredicateFactVisitor.has_subquery): unlike has_cte/
+        # has_union, has_subquery is read off the parse tree, so a derived
+        # table aliased "s" (single-letter reserved token, see
+        # table_scan.py's _ALIAS_TOKEN_TYPES comment) keeps this statement
+        # from parsing as one clean tree and has_subquery goes unset, even
+        # though the query genuinely has a subquery -- pinned here so a
+        # future grammar/driver fix that closes this gap is a conscious,
+        # visible change, not a silent one.
+        sql = "SELECT s.id FROM (SELECT a.id FROM tbord a) s;"
+        self.assertFalse(_identity_rows(sql)[0].has_subquery)
+
+
 class TestAggregateStatementsParseWhole(unittest.TestCase):
     """COUNT/MAX in the SELECT list must not shred the statement into
     resync fragments -- the join REL fact (only reachable through the
@@ -176,6 +283,33 @@ class TestFunctionWrappedPredicates(unittest.TestCase):
     def test_function_fingerprint_resolves_aliases(self):
         sql = "SELECT a.c1 FROM t1 a WHERE UPPER(a.nm) = 'X';"
         self.assertIn("PRED|UPPER(T1.NM)|=", _facts(sql))
+
+    def test_bare_column_function_argument_keeps_its_own_name(self):
+        # SUBSTR(mydatecolumn, 1, 6) used to resolve to no column at all
+        # (_resolve_field_reference requires a table/alias qualifier,
+        # which a bare argument doesn't have) -- the operand silently
+        # became "SUBSTR()", indistinguishable from SUBSTR(*any* other
+        # unqualified column, ...). It now falls back to the bare name,
+        # the same convention GROUP BY already applies to an unqualified
+        # item.
+        sql = "SELECT a.id FROM tbord a WHERE SUBSTR(mydatecolumn, 1, 6) <= '202512';"
+        self.assertIn("PRED|SUBSTR(MYDATECOLUMN)|<=", _facts(sql))
+
+    def test_qualified_and_bare_function_argument_do_not_collapse(self):
+        # A qualified argument still resolves to the more precise
+        # TABLE.COL signature -- distinct from, not merged with, the bare-
+        # name fallback for the same column left unqualified.
+        bare = "SELECT a.id FROM tbord a WHERE SUBSTR(mydatecolumn, 1, 6) <= '202512';"
+        qualified = "SELECT a.id FROM tbord a WHERE SUBSTR(a.mydatecolumn, 1, 6) <= '202512';"
+        self.assertNotEqual(_core_id(bare), _core_id(qualified))
+        self.assertIn("PRED|SUBSTR(TBORD.MYDATECOLUMN)|<=", _facts(qualified))
+
+    def test_bare_column_top_level_predicate_keeps_its_own_name(self):
+        # Same root cause, one level up: `WHERE mydatecolumn <= 'x'` with
+        # no function call used to contribute no PRED fact at all --
+        # completely invisible to the signature, not just imprecise.
+        sql = "SELECT a.id FROM tbord a WHERE mydatecolumn <= '202512';"
+        self.assertIn("PRED|MYDATECOLUMN|<=", _facts(sql))
 
 
 class TestSupplementaryColumns(unittest.TestCase):

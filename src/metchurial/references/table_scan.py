@@ -51,8 +51,8 @@ from metchurial.parsing.token_walk import skip_balanced_parens as _skip_balanced
 from metchurial.parsing.token_walk import skip_hidden as _skip_hidden
 
 __all__ = ["PLACEHOLDER_SCHEMA", "PLACEHOLDER_TABLE", "TableRef", "QueryBlock", "JoinEdge",
-           "looks_like_name_start", "find_cte_names", "scan_query_blocks", "scan_join_edges",
-           "resolve_qualifier", "iter_table_refs"]
+           "looks_like_name_start", "find_cte_names", "has_set_operator", "scan_query_blocks",
+           "scan_join_edges", "resolve_qualifier", "iter_table_refs"]
 
 # Tokens that can never be the next segment of a dotted schema/catalog-
 # qualified name -- everything else immediately after a '.' in a table-
@@ -148,6 +148,19 @@ def find_cte_names(tokens: list[Token]) -> set[str]:
             continue
         break
     return names
+
+
+_SET_OPERATOR_TYPES = {Db2Lexer.UNION, Db2Lexer.INTERSECT, Db2Lexer.EXCEPT}
+
+
+def has_set_operator(tokens: list[Token]) -> bool:
+    """True if a UNION/INTERSECT/EXCEPT keyword appears anywhere in this
+    chunk's default-channel tokens, at any nesting depth. Unlike CTE-body-
+    vs-subquery disambiguation, this needs no paren-depth tracking: these
+    three are reserved keywords with no other grammar role, so a bare
+    token-type membership test is exact, not a heuristic."""
+    return any(t.type in _SET_OPERATOR_TYPES for t in tokens
+              if t.channel == Token.DEFAULT_CHANNEL)
 
 
 def _match_join_qualifier(tokens: list[Token], i: int) -> str | None:
