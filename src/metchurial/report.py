@@ -44,15 +44,19 @@ def md_escape(text: object) -> str:
     return text.replace("|", "\\|").replace("`", "'")
 
 
-def _format_grouped_values(values: Sequence[str]) -> str:
+def _format_grouped_values(values: Sequence[str], pointer_file: str = "findings.tsv") -> str:
     """Join grouped literals for one Markdown cell, capped at
     MAX_GROUPED_VALUES so a large IN(...)/repeated-comparison list (which
     the .tsv already reports one-row-per-literal, uncapped) can't blow up
-    a single cell to thousands of characters."""
+    a single cell to thousands of characters. `pointer_file` names the TSV
+    that actually holds the uncapped list for whichever section is
+    calling this -- callers outside Sensitive Findings (e.g. Relations'
+    per-table-pair predicate list) must pass their own, or the truncation
+    note points readers at the wrong file."""
     if len(values) > MAX_GROUPED_VALUES:
         shown = values[:MAX_GROUPED_VALUES]
-        return "{}; ... (+{} more, see findings.tsv)".format(
-            "; ".join(shown), len(values) - MAX_GROUPED_VALUES)
+        return "{}; ... (+{} more, see {})".format(
+            "; ".join(shown), len(values) - MAX_GROUPED_VALUES, pointer_file)
     return "; ".join(values)
 
 
@@ -270,7 +274,7 @@ def _write_relations(out: TextIO, relations_summary: list[RelationRollup]) -> No
     for row in relations_summary[:MAX_GROUPED_VALUES]:
         a = "{}.{}".format(row.table_a_schema, row.table_a)
         b = "{}.{}".format(row.table_b_schema, row.table_b)
-        preds = _format_grouped_values(row.predicates) if row.predicates else ""
+        preds = _format_grouped_values(row.predicates, "refs_relations.tsv") if row.predicates else ""
         out.write("| `{}` | `{}` | {} | `{}` |\n".format(
             md_escape(a), md_escape(b), row.join_count, md_escape(preds)))
     if len(relations_summary) > MAX_GROUPED_VALUES:
