@@ -59,7 +59,7 @@ class TestQuerySimilarityFlag(unittest.TestCase):
         self.assertTrue(os.path.isfile("refs_query_similarity.tsv"))
         with open("refs_query_similarity.tsv", encoding="utf-8-sig") as f:
             header = f.readline().strip()
-        self.assertEqual(header, "core_id_a\tcore_id_b\tsimilarity\tshared_facts")
+        self.assertEqual(header, "core_id_a\tcore_id_b\tsimilarity\tshared_facts\tonly_in_a\tonly_in_b")
         with open("summary.md", encoding="utf-8-sig") as f:
             summary = f.read()
         self.assertIn("refs_query_similarity.tsv", summary)

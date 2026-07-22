@@ -294,14 +294,19 @@ def _scan_file_body(path: str, text: str, enc: str, options: ScanOptions,
     # is on the default channel (not hidden), so _discover_blocks' own
     # "non-SELECT statement" special case (for a bare UPDATE/DELETE/INSERT
     # with no SELECT keyword) fires on it too, pushing one real, empty
-    # QueryBlock. Filtered out by content (no tables/facts at all) rather
-    # than by an empty `blocks` list, which this chunk doesn't actually
-    # have -- every file's trailing empty chunk would otherwise share the
-    # same degenerate empty-fact-set core_id, falsely "clustering" every
-    # scanned file together.
+    # QueryBlock. Filtered out by content (fact_set has nothing beyond the
+    # always-present SHAPE|BLOCKS fact) rather than by an empty `blocks`
+    # list, which this chunk doesn't actually have -- every file's
+    # trailing empty chunk would otherwise share the same degenerate
+    # empty-fact-set core_id, falsely "clustering" every scanned file
+    # together. Checked against the full fact_set (not table_count/
+    # join_count, which only cover the narrower core_id-relevant facts)
+    # so a statement whose only real content is a predicate or GROUP BY
+    # item -- both deliberately excluded from core_id, see
+    # query_identity.py's module docstring -- still counts as meaningful.
     for blocks, predicate_visitor, line, tokens in query_identity_chunks:
         row = query_identity.build_identity_row(blocks, predicate_visitor, path, line, tokens)
-        if row.table_count or row.join_count or row.predicate_count:
+        if len(row.fact_set) > 1:
             result.identity_rows.append(row)
 
     rescan_comments(

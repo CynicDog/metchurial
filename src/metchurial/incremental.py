@@ -147,8 +147,6 @@ def _deserialize_identity_row(d: dict) -> IdentityRow:
     d["tables"] = tuple(d["tables"])
     d["join_types"] = tuple(d["join_types"])
     d["relations"] = tuple(d["relations"])
-    d["predicates"] = tuple(d["predicates"])
-    d["groupby"] = tuple(d["groupby"])
     return IdentityRow(**d)
 
 

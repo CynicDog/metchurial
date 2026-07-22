@@ -3,7 +3,8 @@
 a `core_id`, a hash of its structural signature, so a corpus of thousands
 of files canonicalizes down to its distinct core queries.
 
-Signature contents (canonical fact strings, one set per statement):
+Every statement's *full* fact set (canonical fact strings, one set per
+statement) has six categories:
 
 * ``TBL|schema|table``       -- every real table referenced, alias-free
 * ``JOINTYPE|type=n``        -- join-type multiset (JOIN/INNER/COMMA
@@ -27,13 +28,29 @@ Signature contents (canonical fact strings, one set per statement):
   so it collapsed onto the bare statement `<q>` in another file even
   though one is a CTE/subquery wrapper and the other is not.
 
-Statements that differ only in SELECT-list projection, column aliasing,
-derived-column arithmetic, table aliases, formatting, comments, literal
-values, ORDER BY, or HAVING share a core_id; statements that differ in
-tables, join topology, join types, WHERE filters, or grouping do not.
-All facts come from the parse tree and the token-scan (table_scan.py)
-with aliases resolved to real table names -- never from normalizing SQL
-text.
+Condensed grouping -- core_id vs. the full fact set:
+    `core_id` is NOT a hash of the full fact set above. It's a hash of a
+    narrower subset that drops PRED| and GROUPBY| facts entirely (see
+    `_facts_for_core_id`) -- only TBL/JOINTYPE/REL/SHAPE discriminate
+    identity. The point of identity here is to collapse a corpus of
+    thousands of files down to a short list of *distinct core queries* --
+    the same report re-run with a narrower WHERE filter, or grouped by
+    one extra column, is still the same underlying query touching the
+    same tables through the same joins, and splitting it into its own
+    core_id just re-inflates the "distinct queries" list back toward the
+    file count, defeating the point. Two statements sharing a core_id can
+    therefore still differ in their filters/grouping -- that's not lost
+    information, it still lives in the full fact set (`IdentityRow.
+    fact_set`), which `--query-similarity` scores over (see below) --
+    it's just not what *identity* discriminates on.
+
+    Statements that differ only in SELECT-list projection, column
+    aliasing, derived-column arithmetic, table aliases, formatting,
+    comments, literal values, ORDER BY, HAVING, WHERE filters, or
+    grouping share a core_id; statements that differ in tables, join
+    topology, or join types do not. All facts come from the parse tree
+    and the token-scan (table_scan.py) with aliases resolved to real
+    table names -- never from normalizing SQL text.
 
 Each identity row also carries supplementary reporting-only fields, never
 read back into the core_id: ``columns`` (every column the statement
@@ -62,8 +79,17 @@ Known limitations, each pinned by tests/test_query_identity_complex.py:
   parse tree required.
 
 Statements that don't share a core_id get a corpus-wide Jaccard
-similarity score over each distinct core_id's representative fact set
-(compute_similarity, O(unique-core-ids^2), stdlib-only).
+similarity score over each distinct core_id's representative *full* fact
+set (compute_similarity, O(unique-core-ids^2), stdlib-only) -- unlike
+core_id, similarity deliberately keeps PRED/GROUPBY granularity, since
+its whole purpose is surfacing near-misses at a finer resolution than
+identity does. Each scored pair also carries `only_in_a`/`only_in_b`: the
+human-readable symmetric difference between the two representative fact
+sets, so a reader can see *which* facts actually differ, not just that
+they scored similar.
+
+See docs/query-identity.md and docs/query-similarity.md for the full
+design, worked examples, and how the two features relate.
 """
 
 from __future__ import annotations
@@ -155,7 +181,15 @@ class _PredicateFactVisitor(Db2ParserVisitor):
     statement_driver.py's tiered driver calls .visit() on this chunk's
     committed fragments (once per Tier-1/Tier-2 fragment) -- state just
     grows across calls, a chunk's own instance is only read back after
-    the whole file's parse_file() call returns (see engine.py)."""
+    the whole file's parse_file() call returns (see engine.py).
+
+    REL/PRED/GROUPBY all land in the same `.facts` set here -- the split
+    between "counts toward core_id" (REL) and "counts toward the full
+    fact_set only" (PRED/GROUPBY) isn't made until build_identity_row
+    calls _facts_for_core_id, downstream of this visitor entirely. Kept
+    that way rather than filtering here so build_fact_set's *full* fact
+    set (what compute_similarity scores over) doesn't need reassembling
+    from two separate visitor-tracked sets."""
 
     def __init__(self, query_blocks: list[QueryBlock]) -> None:
         self.query_blocks = query_blocks
@@ -306,9 +340,29 @@ def build_fact_set(query_blocks: list[QueryBlock],
     return frozenset(facts)
 
 
+# Fact-string prefixes excluded from core_id -- see this module's
+# docstring, "Condensed grouping". Still present in the full fact_set
+# every IdentityRow carries (and that compute_similarity scores over);
+# just not part of what core_id_for hashes.
+_EXCLUDED_FROM_CORE_ID = ("PRED|", "GROUPBY|")
+
+
+def _facts_for_core_id(fact_set: frozenset[str]) -> frozenset[str]:
+    """The subset of a statement's full fact set that actually
+    discriminates its core_id -- TBL/JOINTYPE/REL/SHAPE only. Two
+    statements whose *only* difference is a WHERE predicate or a GROUP BY
+    item hash identically once passed through this filter, so they land
+    on the same core_id even though their full fact_sets (and thus their
+    Jaccard similarity against a third statement) still differ."""
+    return frozenset(f for f in fact_set if not f.startswith(_EXCLUDED_FROM_CORE_ID))
+
+
 def core_id_for(fact_set: frozenset[str]) -> str:
     """Deterministic short hex id -- order-independent (fact_set is
-    hashed via a sorted, joined repr, not Python's own unstable hash())."""
+    hashed via a sorted, joined repr, not Python's own unstable hash()).
+    Callers pass the *narrowed* fact set (_facts_for_core_id's output),
+    not a statement's full fact_set -- build_identity_row is the only
+    caller and does this for you."""
     canonical = "\n".join(sorted(fact_set))
     digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
     return digest[:CORE_ID_LENGTH]
@@ -335,14 +389,39 @@ def _reformat_pred(stripped: str) -> str:
     return "{} {}".format(operand, op)
 
 
+def _humanize_fact(fact: str) -> str:
+    """One raw fact string (as stored in a full fact_set) rendered for
+    human reading -- used for the pairwise similarity TSV's
+    only_in_a/only_in_b diff columns, which mix every fact category
+    together in one cell, unlike IdentityRow's own per-category breakouts
+    (tables/join_types/relations), which never include PRED/GROUPBY at
+    all (see this module's docstring, "Condensed grouping")."""
+    if fact.startswith("TBL|"):
+        return "table {}".format(fact[len("TBL|"):].replace("|", "."))
+    if fact.startswith("JOINTYPE|"):
+        return "join-type {}".format(fact[len("JOINTYPE|"):])
+    if fact.startswith("REL|"):
+        return "join {}".format(_reformat_rel(fact[len("REL|"):]))
+    if fact.startswith("PRED|"):
+        return "predicate {}".format(_reformat_pred(fact[len("PRED|"):]))
+    if fact.startswith("GROUPBY|"):
+        return "group-by {}".format(fact[len("GROUPBY|"):])
+    if fact.startswith("SHAPE|"):
+        return "shape {}".format(fact[len("SHAPE|"):])
+    return fact  # pragma: no cover -- every fact_set entry has a known prefix
+
+
 def build_identity_row(query_blocks: list[QueryBlock], predicate_visitor: _PredicateFactVisitor,
                        path: str, line: int | None, tokens: list[Any]) -> IdentityRow:
     """predicate_visitor: a _PredicateFactVisitor that has already visited
     every committed fragment of this chunk. Its `columns` set, its
     `has_subquery` flag, and the per-category fact breakouts below
-    (`tables`/`join_types`/`relations`/`predicates`/`groupby`), ride along
-    as supplementary information only -- human-readable views of
-    `fact_set` for the TSV, never re-derived into the core_id.
+    (`tables`/`join_types`/`relations`), ride along as supplementary
+    information only -- human-readable views of the *identity-relevant*
+    facts for the TSV, never re-derived into the core_id. `fact_set`
+    itself carries every fact (including PRED/GROUPBY, deliberately
+    excluded from core_id -- see this module's docstring) for
+    compute_similarity to score over.
 
     `tokens`: this chunk's own token slice (same one scan_query_blocks(tokens)
     was built from) -- `has_cte`/`has_union` are read straight off it via
@@ -351,21 +430,19 @@ def build_identity_row(query_blocks: list[QueryBlock], predicate_visitor: _Predi
     as one clean tree (see _PredicateFactVisitor.has_subquery's own
     docstring for why that's not equally true of `has_subquery`)."""
     fact_set = build_fact_set(query_blocks, predicate_visitor.facts)
+    identity_facts = _facts_for_core_id(fact_set)
     return IdentityRow(
-        core_id=core_id_for(fact_set), file=path, line=line,
-        table_count=sum(1 for f in fact_set if f.startswith("TBL|")),
-        join_count=sum(1 for f in fact_set if f.startswith("REL|")),
-        predicate_count=sum(1 for f in fact_set if f.startswith("PRED|")),
+        core_id=core_id_for(identity_facts), file=path, line=line,
+        table_count=sum(1 for f in identity_facts if f.startswith("TBL|")),
+        join_count=sum(1 for f in identity_facts if f.startswith("REL|")),
         has_cte=bool(table_scan.find_cte_names(tokens)),
         has_subquery=predicate_visitor.has_subquery,
         has_union=table_scan.has_set_operator(tokens),
         fact_set=fact_set,
         columns=tuple(sorted(predicate_visitor.columns)),
-        tables=tuple(f.replace("|", ".") for f in _facts_by_prefix(fact_set, "TBL|")),
-        join_types=tuple(_facts_by_prefix(fact_set, "JOINTYPE|")),
-        relations=tuple(_reformat_rel(f) for f in _facts_by_prefix(fact_set, "REL|")),
-        predicates=tuple(_reformat_pred(f) for f in _facts_by_prefix(fact_set, "PRED|")),
-        groupby=tuple(_facts_by_prefix(fact_set, "GROUPBY|")),
+        tables=tuple(f.replace("|", ".") for f in _facts_by_prefix(identity_facts, "TBL|")),
+        join_types=tuple(_facts_by_prefix(identity_facts, "JOINTYPE|")),
+        relations=tuple(_reformat_rel(f) for f in _facts_by_prefix(identity_facts, "REL|")),
     )
 
 
@@ -377,12 +454,19 @@ def _jaccard(a: frozenset[str], b: frozenset[str]) -> float:
 
 def compute_similarity(identity_rows: list[IdentityRow],
                        threshold: float = 0.5) -> list[SimilarityPair]:
-    """Groups rows by core_id, takes one representative fact_set per
-    distinct core_id, and scores every pair of distinct core_ids against
-    each other -- corpus-wide, called once after a full scan_tree()
-    completes (not per-file: needs every core_id discovered across the
-    whole scan to be meaningful). Returns one SimilarityPair per pair scoring at
-    or above `threshold`, sorted by similarity desc."""
+    """Groups rows by core_id, takes one representative *full* fact_set
+    per distinct core_id (including PRED/GROUPBY -- see this module's
+    docstring, "Condensed grouping": core_id itself deliberately excludes
+    them, but similarity scoring deliberately keeps them, since surfacing
+    a finer-grained near-miss than identity does is the whole point of
+    this pass), and scores every pair of distinct core_ids against each
+    other -- corpus-wide, called once after a full scan_tree() completes
+    (not per-file: needs every core_id discovered across the whole scan
+    to be meaningful). Returns one SimilarityPair per pair scoring at or
+    above `threshold`, sorted by similarity desc. `only_in_a`/`only_in_b`
+    on each pair are the human-readable symmetric difference (see
+    _humanize_fact) -- sorted for stable output, not by any notion of
+    importance."""
     representatives: dict[str, frozenset[str]] = {}
     for row in identity_rows:
         representatives.setdefault(row.core_id, row.fact_set)
@@ -392,12 +476,15 @@ def compute_similarity(identity_rows: list[IdentityRow],
     for i in range(len(ids)):
         for j in range(i + 1, len(ids)):
             a, b = ids[i], ids[j]
-            score = _jaccard(representatives[a], representatives[b])
+            facts_a, facts_b = representatives[a], representatives[b]
+            score = _jaccard(facts_a, facts_b)
             if score >= threshold:
                 pairs.append(SimilarityPair(
                     core_id_a=a, core_id_b=b,
                     similarity=round(score, 3),
-                    shared_facts=len(representatives[a] & representatives[b]),
+                    shared_facts=len(facts_a & facts_b),
+                    only_in_a=tuple(sorted(_humanize_fact(f) for f in facts_a - facts_b)),
+                    only_in_b=tuple(sorted(_humanize_fact(f) for f in facts_b - facts_a)),
                 ))
     pairs.sort(key=lambda p: -p.similarity)
     return pairs
@@ -406,5 +493,6 @@ def compute_similarity(identity_rows: list[IdentityRow],
 def write_similarity_tsv(path: str, similarity_rows: list[SimilarityPair]) -> None:
     """Same TSV conventions as tsv.write_refs_tsv (utf-8-sig,
     tab-separated, header row always written even for an empty list)."""
-    write_refs_tsv(path, ["core_id_a", "core_id_b", "similarity", "shared_facts"],
+    write_refs_tsv(path, ["core_id_a", "core_id_b", "similarity", "shared_facts",
+                          "only_in_a", "only_in_b"],
                    similarity_rows)

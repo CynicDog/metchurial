@@ -28,11 +28,17 @@ from metchurial.references import query_identity  # noqa: E402
 
 CORE_A = ["20_query_identity_base.sql", "21_query_identity_alias_variant.sql",
          "22_query_identity_extra_column.sql", "23_query_identity_derived_column_variant.sql",
+         "25_query_identity_predicate_variant.sql",
          "30_query_identity_comma_join_variant.sql", "31_query_identity_join_order_variant.sql"]
 CORE_B = ["34_query_identity_core_b_base.sql", "35_query_identity_core_b_alias_variant.sql",
          "36_query_identity_core_b_extra_column.sql"]
-NEAR_MISS = ["24_query_near_miss_extra_join.sql", "25_query_near_miss_different_predicate.sql",
-            "32_query_near_miss_join_type_change.sql"]
+# 25 (a predicate-only variant of 20) used to live here: predicates are
+# now deliberately excluded from core_id (see query_identity.py's module
+# docstring, "Condensed grouping"), so it collapses onto CORE_A outright
+# and moved up into that list instead -- it's still worth keeping as a
+# fact_set-level near miss (TestNearMissesGetDistinctIdsButScoreSimilar's
+# _fact_set-based similarity assertions still cover it).
+NEAR_MISS = ["24_query_near_miss_extra_join.sql", "32_query_near_miss_join_type_change.sql"]
 NEGATIVE = ["26_query_distinct_unrelated_domain.sql", "27_query_distinct_single_table.sql"]
 HARD_CASES = ["33_query_hard_case_subquery_rewrite.sql", "37_query_hard_case_union_all.sql"]
 
@@ -104,7 +110,7 @@ class TestNearMissesGetDistinctIdsButScoreSimilar(unittest.TestCase):
         core_a_facts = _fact_set(CORE_A[0])
         flip_score = query_identity._jaccard(core_a_facts, _fact_set("32_query_near_miss_join_type_change.sql"))
         predicate_score = query_identity._jaccard(
-            core_a_facts, _fact_set("25_query_near_miss_different_predicate.sql"))
+            core_a_facts, _fact_set("25_query_identity_predicate_variant.sql"))
         self.assertGreater(flip_score, predicate_score)
 
 

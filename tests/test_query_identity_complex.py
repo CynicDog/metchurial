@@ -3,12 +3,15 @@
 real scan_file() pipeline on inline SQL.
 
 Covers the enterprise canonicalization contract: two statements are the
-same core query iff they share tables, join topology and types, filter
-predicates, and grouping -- SELECT-list projection, aliasing, derived-
-column arithmetic, formatting, literal values, and ORDER BY never
-discriminate. Also pins the constructs that historically broke the
-signature silently: GROUP BY in aggregate (COUNT/MAX) statements,
-reserved-keyword CTE/table names (BASE, ...), and multi-CTE statements.
+same core query iff they share tables and join topology/types --
+SELECT-list projection, aliasing, derived-column arithmetic, formatting,
+literal values, ORDER BY, filter predicates, and grouping never
+discriminate core_id (see query_identity.py's module docstring,
+"Condensed grouping"; predicates/grouping still live in the full
+fact_set that --query-similarity scores over). Also pins the constructs
+that historically broke the signature silently: GROUP BY in aggregate
+(COUNT/MAX) statements, reserved-keyword CTE/table names (BASE, ...),
+and multi-CTE statements.
 
 Deliberate exclusions (HAVING, ORDER BY, the SELECT list) and the
 supplementary columns field are pinned so a future behavior change is a
@@ -58,25 +61,29 @@ AGG_BASE = ("SELECT a.dept_cd, COUNT(a.emp_id), MAX(a.sal) FROM tbemp a "
             "WHERE a.stat = 'A' GROUP BY a.dept_cd;")
 
 
-class TestGroupByIsPartOfTheSignature(unittest.TestCase):
-    """GROUP BY items are signature facts -- statements differing only in
-    grouping are different core queries, including in aggregate
-    (COUNT/MAX) statements, which parse as one clean tree since the
-    grammar's function_name rule accepts those reserved names."""
+class TestGroupByIsExcludedFromCoreIdButKeptInFactSet(unittest.TestCase):
+    """GROUP BY items are deliberately excluded from core_id (see
+    query_identity.py's module docstring, "Condensed grouping") --
+    statements differing only in grouping are still the same core query,
+    including in aggregate (COUNT/MAX) statements, which parse as one
+    clean tree since the grammar's function_name rule accepts those
+    reserved names. The GROUPBY facts themselves still land in the full
+    fact_set, which compute_similarity scores over -- see
+    test_group_by_facts_resolve_aliases_to_real_tables below."""
 
-    def test_different_group_by_columns_do_not_collapse(self):
+    def test_different_group_by_columns_still_collapse(self):
         variant = AGG_BASE.replace("GROUP BY a.dept_cd", "GROUP BY a.stat")
-        self.assertNotEqual(_core_id(AGG_BASE), _core_id(variant))
+        self.assertEqual(_core_id(AGG_BASE), _core_id(variant))
 
-    def test_group_by_vs_no_group_by_do_not_collapse(self):
+    def test_group_by_vs_no_group_by_still_collapse(self):
         no_group = ("SELECT a.dept_cd FROM tbemp a "
                     "JOIN tbdept b ON a.dept_cd = b.dept_cd WHERE a.stat = 'A';")
         with_group = no_group.replace(";", " GROUP BY a.dept_cd;")
-        self.assertNotEqual(_core_id(no_group), _core_id(with_group))
+        self.assertEqual(_core_id(no_group), _core_id(with_group))
 
-    def test_extra_group_by_column_does_not_collapse(self):
+    def test_extra_group_by_column_still_collapses(self):
         wider = AGG_BASE.replace("GROUP BY a.dept_cd", "GROUP BY a.dept_cd, a.stat")
-        self.assertNotEqual(_core_id(AGG_BASE), _core_id(wider))
+        self.assertEqual(_core_id(AGG_BASE), _core_id(wider))
 
     def test_alias_renaming_keeps_group_by_signature(self):
         renamed = (AGG_BASE.replace("tbemp a", "tbemp emp").replace("tbdept b", "tbdept d")
@@ -128,11 +135,16 @@ class TestReservedKeywordCteNames(unittest.TestCase):
         flipped = CTE_BASE.replace("LEFT JOIN", "INNER JOIN")
         self.assertNotEqual(_core_id(CTE_BASE), _core_id(flipped))
 
-    def test_cte_body_predicate_change_does_not_collapse(self):
+    def test_cte_body_predicate_change_still_collapses(self):
+        # A new WHERE clause in the CTE body is a PRED-only change --
+        # deliberately excluded from core_id (see query_identity.py's
+        # module docstring, "Condensed grouping"), so this still lands on
+        # CTE_BASE's core_id even though the two fact_sets differ (that
+        # difference is what --query-similarity would score, not core_id).
         changed = CTE_BASE.replace("b.id, SUM(b.qty) qty FROM tbitem b GROUP BY b.id",
                                    "b.id, SUM(b.qty) qty FROM tbitem b "
                                    "WHERE b.del_yn = 'N' GROUP BY b.id")
-        self.assertNotEqual(_core_id(CTE_BASE), _core_id(changed))
+        self.assertEqual(_core_id(CTE_BASE), _core_id(changed))
 
 
 class TestWrapperDoesNotCollapseOntoBareQuery(unittest.TestCase):
@@ -267,13 +279,17 @@ class TestDeliberateExclusions(unittest.TestCase):
 
 class TestFunctionWrappedPredicates(unittest.TestCase):
     """A function-wrapped predicate operand contributes a
-    FN(table.col,...) fingerprint -- the function name and its column
-    inputs discriminate, literal arguments never do."""
+    FN(table.col,...) fingerprint to the full fact_set -- the function
+    name and its column inputs discriminate, literal arguments never do.
+    PRED facts are deliberately excluded from core_id (see
+    query_identity.py's module docstring, "Condensed grouping"), so none
+    of this discriminates core_id itself; it's what compute_similarity
+    scores over instead."""
 
-    def test_different_functions_do_not_collapse(self):
+    def test_different_functions_still_collapse(self):
         upper = "SELECT a.c1 FROM t1 a WHERE UPPER(a.nm) = 'X';"
         coalesce = "SELECT a.c1 FROM t1 a WHERE COALESCE(a.nm, '') = 'X';"
-        self.assertNotEqual(_core_id(upper), _core_id(coalesce))
+        self.assertEqual(_core_id(upper), _core_id(coalesce))
 
     def test_literal_argument_change_collapses(self):
         one = "SELECT a.c1 FROM t1 a WHERE COALESCE(a.nm, 'x') = 'X';"
@@ -295,13 +311,15 @@ class TestFunctionWrappedPredicates(unittest.TestCase):
         sql = "SELECT a.id FROM tbord a WHERE SUBSTR(mydatecolumn, 1, 6) <= '202512';"
         self.assertIn("PRED|SUBSTR(MYDATECOLUMN)|<=", _facts(sql))
 
-    def test_qualified_and_bare_function_argument_do_not_collapse(self):
+    def test_qualified_and_bare_function_argument_differ_in_fact_set_only(self):
         # A qualified argument still resolves to the more precise
-        # TABLE.COL signature -- distinct from, not merged with, the bare-
-        # name fallback for the same column left unqualified.
+        # TABLE.COL signature in the full fact_set -- distinct from, not
+        # merged with, the bare-name fallback for the same column left
+        # unqualified. Both are PRED facts though, so this distinction
+        # doesn't reach core_id (only the fact_set/similarity pass).
         bare = "SELECT a.id FROM tbord a WHERE SUBSTR(mydatecolumn, 1, 6) <= '202512';"
         qualified = "SELECT a.id FROM tbord a WHERE SUBSTR(a.mydatecolumn, 1, 6) <= '202512';"
-        self.assertNotEqual(_core_id(bare), _core_id(qualified))
+        self.assertEqual(_core_id(bare), _core_id(qualified))
         self.assertIn("PRED|SUBSTR(TBORD.MYDATECOLUMN)|<=", _facts(qualified))
 
     def test_bare_column_top_level_predicate_keeps_its_own_name(self):
