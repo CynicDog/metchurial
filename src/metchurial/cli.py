@@ -2,8 +2,9 @@
 """Argparse CLI entry point: parses flags, drives scan_tree() over the
 given root, and writes every output artifact (summary.md, findings.tsv,
 strings.txt, stopwords.txt, known_names.txt, bad_files.txt, the
---extract-metadata refs_*.tsv files, and the --split-selects
-split_manifest.tsv) into the current working directory.
+--extract-metadata refs_*.tsv files, the --split-selects
+split_manifest.tsv, and the --incremental incremental_cache.json) into
+the current working directory.
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ from metchurial.io_utils import (ensure_known_names_template, ensure_stopwords_t
 from metchurial.report import write_markdown_report, write_tsv_report, write_strings_file
 from metchurial.tsv import write_refs_tsv
 from metchurial.engine import scan_tree
+from metchurial import incremental as incremental_module
 from metchurial.models.options import (DEFAULT_EXTENSIONS, DEFAULT_MAX_CHUNK_ITERATIONS,
                                        DEFAULT_SENSITIVE_COLUMNS, ScanOptions)
 
@@ -50,6 +52,7 @@ RELATIONS_PATH = "refs_relations.tsv"
 QUERY_IDENTITY_PATH = "refs_query_identity.tsv"
 QUERY_SIMILARITY_PATH = "refs_query_similarity.tsv"
 SPLIT_MANIFEST_PATH = "split_manifest.tsv"
+INCREMENTAL_CACHE_PATH = "incremental_cache.json"
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -73,7 +76,15 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--extensions", nargs="+", default=list(DEFAULT_EXTENSIONS),
                     help="File extensions to scan, without the dot (default: %(default)s)")
     ap.add_argument("--verbose", action="store_true",
-                    help="Print a [i/N] progress line to stderr as each file is scanned")
+                    help="Also print a one-line ANTLR processing summary to stderr after "
+                        "each file's [i/N] progress line: chunk count, tiered-loop "
+                        "iterations (broken down into direct structural/token-scan hits, "
+                        "Tier 2 resyncs, and Tier 3 single-token skips -- see "
+                        "parsing/statement_driver.py), and elapsed time -- a summary, not "
+                        "a full profile, meant to show at a glance which file(s) in a "
+                        "large tree are the slow ones and roughly why. The [i/N] progress "
+                        "line itself is always printed regardless of this flag "
+                        "(default: off)")
     ap.add_argument("--workers", type=int, default=1, metavar="N",
                     help="Scan files in N worker processes instead of one "
                         "(default: %(default)s, i.e. serial). Parsing is "
@@ -91,8 +102,10 @@ def main(argv: list[str] | None = None) -> None:
                         "Known Limitations.")
     ap.add_argument("--extract-metadata", action="store_true",
                     help="Emit refs_tables.tsv/refs_columns.tsv (every schema.table and "
-                        "schema.table.column reference found), refs_relations.tsv (table-to-table "
-                        "JOIN usage -- comma-joins and explicit JOIN...ON/USING alike), "
+                        "schema.table.column reference found), refs_relations.tsv (every "
+                        "table-to-table JOIN edge found, one row per occurrence with join "
+                        "type/predicate/file/line -- comma-joins and explicit JOIN...ON/USING "
+                        "alike), "
                         "refs_functions.tsv (every function call and predicate operator found), "
                         "and refs_query_identity.tsv (a core_id per statement -- structurally "
                         "identical statements share one id regardless of column aliasing/"
@@ -122,6 +135,17 @@ def main(argv: list[str] | None = None) -> None:
                         "own quote character; '0000' for an unquoted numeric "
                         "literal), everything else byte-for-byte identical. A file "
                         "with no findings is left untouched (default: off)")
+    ap.add_argument("--incremental", action="store_true",
+                    help="Skip re-scanning a file whose size+mtime and requested "
+                        "--extract-metadata/--split-selects flags both match its "
+                        "entry in incremental_cache.json from a previous run -- its "
+                        "cached results are merged into this run's reports exactly "
+                        "as if it had been freshly scanned, so refs_*.tsv/summary.md/"
+                        "split_manifest.tsv stay complete across incremental runs on "
+                        "a large tree instead of shrinking to just the files touched "
+                        "this run. A file with no cache entry, a changed fingerprint, "
+                        "or a cache entry recorded under a different flag combination "
+                        "is always scanned fresh (default: off)")
     args = ap.parse_args(argv)
 
     if args.query_similarity and not args.extract_metadata:
@@ -173,11 +197,49 @@ def main(argv: list[str] | None = None) -> None:
     options = (ScanOptions.metadata(**common) if args.extract_metadata
                else ScanOptions(**common))
 
-    def print_progress(i: int, total: int, path: str) -> None:
+    def print_progress(i: int, total: int, path: str, result: object) -> None:
         print("[{}/{}] Scanned: {}".format(i, total, path), file=sys.stderr)
+        if not args.verbose:
+            return
+        if result.bad_reason is not None:
+            print("        antlr: skipped -- {}".format(result.bad_reason), file=sys.stderr)
+        elif result.parse_stats is None:
+            print("        antlr: reused from cache (--incremental)", file=sys.stderr)
+        else:
+            s = result.parse_stats
+            print("        antlr: {} chunk(s), {} iteration(s) "
+                 "(struct={} scan={} resync={} skip={}), {:.3f}s".format(
+                     s.chunks, s.iterations, s.tier1_structural, s.tier1_token_scan,
+                     s.tier2_resync, s.tier3_skip, s.elapsed_seconds), file=sys.stderr)
+
+    # --incremental: reuse a previous run's cached FileScanResult for any
+    # file whose (size, mtime_ns) and extract_*/split_selects mode both
+    # still match -- see incremental.py's module docstring for why those
+    # are the only two things checked. cached_results primes scan_tree
+    # with what's reusable; on_file_result captures every file's result
+    # (cached or freshly scanned) back into `incremental_cache`, which
+    # gets written out once the scan finishes so the next run benefits.
+    incremental_cache: dict[str, dict] = {}
+    cached_results: dict[str, object] = {}
+    mode = incremental_module.mode_signature(options)
+    if args.incremental:
+        incremental_cache = incremental_module.load_cache(INCREMENTAL_CACHE_PATH)
+        for abspath in list(incremental_cache):
+            cached = incremental_module.lookup(incremental_cache, abspath, mode)
+            if cached is not None:
+                cached_results[abspath] = cached
+        exclude_paths.add(os.path.abspath(INCREMENTAL_CACHE_PATH))
+
+    def on_file_result(path: str, result: object) -> None:
+        incremental_module.record(incremental_cache, os.path.abspath(path), mode, result)
 
     tree = scan_tree(args.root, options, exclude_paths=exclude_paths,
-                     progress=print_progress if args.verbose else None)
+                     progress=print_progress,
+                     cached_results=cached_results if args.incremental else None,
+                     on_file_result=on_file_result if args.incremental else None)
+
+    if args.incremental:
+        incremental_module.save_cache(INCREMENTAL_CACHE_PATH, incremental_cache)
 
     # Preserve skipped (still-unfixed) entries from previous runs, and add
     # anything newly flagged this run -- a file the user removed from
@@ -204,7 +266,8 @@ def main(argv: list[str] | None = None) -> None:
         "workers": args.workers, "max_chunk_iterations": args.max_chunk_iterations,
         "extract_metadata": args.extract_metadata, "query_similarity": args.query_similarity,
         "split_selects": args.split_selects,
-        "mask_literals": args.mask_literals, "verbose": args.verbose,
+        "mask_literals": args.mask_literals, "incremental": args.incremental,
+        "verbose": args.verbose,
     }
     write_markdown_report(
         SUMMARY_PATH, run_info, tree,
@@ -235,7 +298,8 @@ def main(argv: list[str] | None = None) -> None:
         function_rows = sorted(tree.function_calls, key=lambda r: (r.function, r.file, r.line))
         write_refs_tsv(FUNCTIONS_PATH, ["function", "parameters", "file", "line"], function_rows)
 
-        relations_module.write_relations_tsv(RELATIONS_PATH, relations_summary)
+        relation_rows = sorted(tree.relation_edges, key=lambda r: (r.file, r.line))
+        relations_module.write_relations_tsv(RELATIONS_PATH, relation_rows)
 
         identity_rows = sorted(tree.identity_rows, key=lambda r: (r.core_id, r.file, r.line or 0))
         write_refs_tsv(QUERY_IDENTITY_PATH,
@@ -286,6 +350,10 @@ def main(argv: list[str] | None = None) -> None:
         print("Bad files      : {} skipped (already in bad_files.txt), {} newly flagged "
              "this run -- see {}".format(
                  len(previously_bad), len(tree.bad_files), os.path.abspath(BAD_FILES_PATH)))
+    if args.incremental:
+        print("Incremental    : {} file(s) reused from cache, {} scanned fresh -- see {}".format(
+            len(cached_results), tree.file_count - len(cached_results),
+            os.path.abspath(INCREMENTAL_CACHE_PATH)))
 
     sys.exit(1 if all_findings else 0)
 

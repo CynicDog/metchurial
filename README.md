@@ -157,7 +157,8 @@ literals are sensitive or which unparseable files are safe to ignore.
 | `--mask-literals` | off | Rewrite in place every flagged literal's content to a fixed placeholder (`'****'`/`"****"` for quoted, `0000` for unquoted numeric), everything else byte-for-byte identical — back up files first, this overwrites them |
 | `--workers N` | `1` | Scan across N worker processes instead of one |
 | `--max-chunk-iterations N` | `200000` | Safety-valve cap on the resync driver's loop iterations per statement chunk |
-| `--verbose` | off | Print a `[i/N]` progress line to stderr as each file is scanned |
+| `--incremental` | off | Skip re-scanning a file whose size+mtime and extract-metadata/split-selects flags both match its entry in `incremental_cache.json` from a previous run; its cached results are merged into this run's reports as if freshly scanned, so `refs_*.tsv`/`summary.md`/`split_manifest.tsv` stay complete across incremental runs on a large tree |
+| `--verbose` | off | Also print a one-line ANTLR processing summary (chunk count, tiered-loop iteration breakdown, elapsed time) to stderr after each file's `[i/N]` progress line, which itself is always printed regardless of this flag |
 
 `--workers N` scans files across N worker processes (`concurrent.futures.
 ProcessPoolExecutor`, stdlib only). Parsing is CPU-bound pure Python, so
@@ -255,7 +256,7 @@ not a duplicate of it.
 | `refs_tables.tsv` | `--extract-metadata` | Every `schema.table` reference found, with file/line |
 | `refs_columns.tsv` | `--extract-metadata` | Every `schema.table.column` reference found, with file/line |
 | `refs_functions.tsv` | `--extract-metadata` | Every function call and predicate operator found, with operands/file/line |
-| `refs_relations.tsv` | `--extract-metadata` | Table-to-table JOIN usage aggregated across the whole scan (one file, not per-directory) |
+| `refs_relations.tsv` | `--extract-metadata` | Every table-to-table JOIN edge found, one row per occurrence, with join type/predicate/file/line. The cross-file table-pair rollup (grouped by table_a/table_b with a join count) is summary.md's own "## Relations" section, not this file |
 | `refs_query_identity.tsv` | `--extract-metadata` | One `core_id` per statement — structurally identical statements share one id regardless of aliasing/projection/formatting differences |
 | `refs_query_similarity.tsv` | `--query-similarity` | Pairwise Jaccard similarity between distinct `core_id`s that don't match exactly |
 | `split_manifest.tsv` | `--split-selects` | One row per split file actually written: `original_file`, `split_file`, `block_number`, `total_blocks` -- the record of which now-deleted original each split file came from |

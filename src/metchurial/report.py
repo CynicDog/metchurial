@@ -120,6 +120,7 @@ def _write_run_info(out: TextIO, run_info: dict[str, Any]) -> None:
     out.write("| Query similarity | {} |\n".format("ON" if run_info["query_similarity"] else "OFF"))
     out.write("| Split selects | {} |\n".format("ON" if run_info["split_selects"] else "OFF"))
     out.write("| Mask literals | {} |\n".format("ON" if run_info["mask_literals"] else "OFF"))
+    out.write("| Incremental | {} |\n".format("ON" if run_info["incremental"] else "OFF"))
     out.write("| Verbose | {} |\n\n".format("ON" if run_info["verbose"] else "OFF"))
 
 
@@ -258,8 +259,9 @@ def _write_relations(out: TextIO, relations_summary: list[RelationRollup]) -> No
     if not relations_summary:
         out.write("No JOIN relationships detected.\n\n")
         return
-    out.write("_Top table-to-table relationships across the whole scan; full list "
-              "in refs_relations.tsv._\n\n")
+    out.write("_Top table-to-table relationships across the whole scan, by join count; "
+              "the per-occurrence detail (file/line/predicate for every individual join "
+              "edge) is in refs_relations.tsv._\n\n")
     out.write("| Table A | Table B | Join Count | Predicates |\n")
     out.write("|---|---|---:|---|\n")
     for row in relations_summary[:MAX_GROUPED_VALUES]:
@@ -269,7 +271,8 @@ def _write_relations(out: TextIO, relations_summary: list[RelationRollup]) -> No
         out.write("| `{}` | `{}` | {} | `{}` |\n".format(
             md_escape(a), md_escape(b), row.join_count, md_escape(preds)))
     if len(relations_summary) > MAX_GROUPED_VALUES:
-        out.write("\n_...+{} more table-pair(s), see refs_relations.tsv._\n".format(
+        out.write("\n_...+{} more table-pair(s) by count; see refs_relations.tsv for the "
+                  "full per-occurrence list._\n".format(
             len(relations_summary) - MAX_GROUPED_VALUES))
     out.write("\n")
 

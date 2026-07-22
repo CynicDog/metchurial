@@ -25,6 +25,7 @@ from __future__ import annotations
 import bisect
 import os
 import re
+import time
 from typing import Any, Callable, Iterator
 
 from antlr4.Token import Token
@@ -36,6 +37,7 @@ from metchurial.detect.supplementary_checks import make_token_scan_fallback
 from metchurial.io_utils import read_text
 from metchurial.models.findings import Finding
 from metchurial.models.options import DEFAULT_SENSITIVE_COLUMNS, ScanOptions
+from metchurial.models.parse_stats import ParseStats
 from metchurial.models.references import ColumnUse, FunctionCall, TableUse
 from metchurial.models.relations import RelationEdge
 from metchurial.models.results import FileScanResult, TreeScanResult
@@ -51,8 +53,11 @@ from metchurial.split import select_blocks
 # (models/options.py), the single source of truth for every scan knob.
 DEFAULT_COLUMNS = list(DEFAULT_SENSITIVE_COLUMNS)
 
-# One file finished scanning: called as progress(i, total, path).
-ProgressFn = Callable[[int, int, str], None]
+# One file finished scanning: called as progress(i, total, path, result) --
+# `result` is that file's FileScanResult (cached or freshly scanned), so a
+# caller (cli.py's --verbose) can report on result.parse_stats without
+# engine.py needing to know anything about how that gets displayed.
+ProgressFn = Callable[[int, int, str, FileScanResult], None]
 
 # Cap on a Markdown/TSV snippet's length (one source line, already).
 SNIPPET_MAX_LEN = 160
@@ -120,8 +125,15 @@ def scan_file(path: str, options: ScanOptions | None = None) -> FileScanResult:
     (bad_file_check.py) that skipped the expensive parse entirely, or an
     unexpected exception caught here so one bad file can't take down a
     whole tree scan. Not printed per-file to stderr -- recorded in
-    bad_files.txt, with cli.py printing one aggregate count at the end."""
+    bad_files.txt, with cli.py printing one aggregate count at the end.
+
+    `parse_stats` (models/parse_stats.py) is set on the returned result
+    for a normal scan, None for a bad file -- there's no ANTLR work to
+    report on in that case. `elapsed_seconds` covers this whole call
+    (lexing, quality gate, and every detection/extraction pass), not just
+    the tiered parse -- see cli.py's --verbose summary line."""
     options = options if options is not None else ScanOptions()
+    t0 = time.perf_counter()
     try:
         text, enc = read_text(path)
     except OSError as e:
@@ -137,10 +149,13 @@ def scan_file(path: str, options: ScanOptions | None = None) -> FileScanResult:
         return FileScanResult(bad_reason=bad_reason)
 
     try:
-        return _scan_file_body(path, text, enc, options, lexed)
+        result = _scan_file_body(path, text, enc, options, lexed)
     except Exception as e:
         return FileScanResult(
             bad_reason="crashed while scanning: {}: {}".format(type(e).__name__, e))
+    if result.parse_stats is not None:
+        result.parse_stats.elapsed_seconds = time.perf_counter() - t0
+    return result
 
 
 def _scan_file_body(path: str, text: str, enc: str, options: ScanOptions,
@@ -153,6 +168,7 @@ def _scan_file_body(path: str, text: str, enc: str, options: ScanOptions,
     stopwords = options.stopwords
     known_names = options.known_names
     result = FileScanResult()
+    result.parse_stats = ParseStats()
     # One (query_blocks, predicate_visitor, line, tokens) tuple per chunk,
     # appended inside pre_chunk_hook -- can only be turned into final
     # IdentityRows *after* parse_file() returns for the whole file, since a
@@ -264,7 +280,7 @@ def _scan_file_body(path: str, text: str, enc: str, options: ScanOptions,
 
     all_tokens, _lexer_errors = parse_file(
         text, visitor, fallback, max_iterations_per_chunk=options.max_chunk_iterations,
-        pre_chunk_hook=pre_chunk_hook, lexed=lexed)
+        pre_chunk_hook=pre_chunk_hook, lexed=lexed, stats=result.parse_stats)
 
     # Only safe to finalize now -- every chunk's predicate_visitor has
     # seen every committed fragment of its own chunk by the time
@@ -401,12 +417,41 @@ def _dedupe_same_name_files(names: list[str], known_extensions: frozenset[str]) 
     "query1.bak") are always treated as the same file for scanning
     purposes, on the assumption that a backup-suffixed sibling is always
     just a copy (stale or otherwise) of the real file, never independent
-    data. Among same-identity names the shortest is kept, on the
-    assumption that the extra suffix marks the backup copy."""
+    data.
+
+    A name whose outer extension is backup-like (_BACKUP_LIKE_EXTENSIONS)
+    always loses to one that isn't, regardless of length -- plain
+    shortest-name-wins breaks down for a bare backup file like
+    "query1.bak" sitting next to "query1.sql": both reduce to identity
+    "query1" and are the same length, so a length-only tie-break falls
+    through to alphabetical order, where "bak" sorts before "sql" and the
+    backup copy would win, leaving the real source file completely
+    unscanned. Among two non-backup (or two backup) names, the shortest
+    is kept, tie-broken alphabetically for determinism."""
     groups: dict[str, list[str]] = {}
     for name in names:
         groups.setdefault(_file_identity(name, known_extensions), []).append(name)
-    return [min(group, key=lambda n: (len(n), n)) for group in groups.values()]
+
+    def rank(name: str) -> tuple[bool, int, str]:
+        outer_ext = os.path.splitext(name)[1][1:].lower()
+        return (outer_ext in _BACKUP_LIKE_EXTENSIONS, len(name), name)
+
+    return [min(group, key=rank) for group in groups.values()]
+
+
+def _is_stale_split_output(name: str, sibling_names: set[str]) -> bool:
+    """True iff `name` looks like a --split-select output file (e.g.
+    "report-01.sql") AND its un-suffixed original ("report.sql") is still
+    present among `sibling_names` -- the actual double-count risk (split
+    block counted once under the original's name, once under its own).
+    write_split_files always deletes the original once its split siblings
+    are written, so once that's actually happened, the split files are
+    the only copy of that data left on disk and must be scanned like any
+    other file -- otherwise a later, separate run (e.g. --extract-metadata
+    by itself, after an earlier --split-selects run already deleted the
+    original) would find nothing for that file, forever."""
+    original = select_blocks.split_output_original_name(name)
+    return original is not None and original in sibling_names
 
 
 def _matching_files(root: str, suffixes: tuple[str, ...], extensions: tuple[str, ...],
@@ -414,12 +459,9 @@ def _matching_files(root: str, suffixes: tuple[str, ...], extensions: tuple[str,
     known_extensions = (frozenset(e.lower().lstrip(".") for e in extensions)
                         | _BACKUP_LIKE_EXTENSIONS)
     for dirpath, _dirnames, filenames in os.walk(root):
-        # A --split-select output file (e.g. report-01.sql) is scan
-        # output, not fresh input -- skip it, or a later scan of the same
-        # tree double-counts every split block under its own filename
-        # alongside the untouched original.
+        name_set = set(filenames)
         candidates = [name for name in filenames if name.lower().endswith(suffixes)
-                     and not select_blocks.looks_like_split_output(name)]
+                     and not _is_stale_split_output(name, name_set)]
         for name in _dedupe_same_name_files(candidates, known_extensions):
             full = os.path.join(dirpath, name)
             if os.path.abspath(full) in exclude_paths:
@@ -446,7 +488,10 @@ def _merge_result(tree: TreeScanResult, path: str, result: FileScanResult,
 
 def scan_tree(root: str, options: ScanOptions | None = None, *,
               exclude_paths: set[str] | None = None,
-              progress: ProgressFn | None = None) -> TreeScanResult:
+              progress: ProgressFn | None = None,
+              cached_results: dict[str, FileScanResult] | None = None,
+              on_file_result: Callable[[str, FileScanResult], None] | None = None,
+              ) -> TreeScanResult:
     """Recursively scans files under root whose extension is in
     `options.extensions` (case-insensitive, without the dot). Returns a
     TreeScanResult (metchurial/models/results.py) merging every file's
@@ -467,9 +512,20 @@ def scan_tree(root: str, options: ScanOptions | None = None, *,
     the scanner's own output files from being scanned if they happen to
     live inside the scanned tree.
 
-    `progress`, if given, is called as progress(i, total, path) as each
-    file finishes -- the library itself never prints (cli.py's --verbose
-    passes a stderr printer here).
+    `progress`, if given, is called as progress(i, total, path, result) as
+    each file finishes -- the library itself never prints (cli.py passes
+    a stderr printer here, unconditionally on now; --verbose only changes
+    how much that printer shows per file).
+
+    `cached_results`, if given, maps abspath -> a previously-computed
+    FileScanResult to reuse instead of calling scan_file() for that path
+    (--incremental; see incremental.py, which owns fingerprint/mode
+    matching -- this function only consumes whatever the caller already
+    decided is reusable). A file not present here is scanned normally.
+    `on_file_result`, if given, is called as on_file_result(path, result)
+    for every file once its result (cached or freshly scanned) is known
+    -- lets a caller (cli.py) persist an updated cache without engine.py
+    needing to know anything about cache file formats itself.
 
     `options.workers` > 1 scans files in separate processes
     (concurrent.futures.ProcessPoolExecutor -- parsing is CPU-bound pure
@@ -485,28 +541,45 @@ def scan_tree(root: str, options: ScanOptions | None = None, *,
     options = options if options is not None else ScanOptions()
     suffixes = tuple("." + ext.lower().lstrip(".") for ext in options.extensions)
     exclude_paths = exclude_paths or set()
+    cached_results = cached_results or {}
     tree = TreeScanResult()
 
     files = list(_matching_files(root, suffixes, options.extensions, exclude_paths))
     tree.file_count = len(files)
 
+    def merge_one(full: str, result: FileScanResult) -> None:
+        _merge_result(tree, full, result, options.split_selects)
+        if on_file_result:
+            on_file_result(full, result)
+
     if options.workers <= 1:
         for i, full in enumerate(files, 1):
-            result = scan_file(full, options)
-            _merge_result(tree, full, result, options.split_selects)
+            cached = cached_results.get(os.path.abspath(full))
+            result = cached if cached is not None else scan_file(full, options)
+            merge_one(full, result)
             if progress:
-                progress(i, tree.file_count, full)
+                progress(i, tree.file_count, full, result)
         return tree
 
     import concurrent.futures
 
+    to_scan = [f for f in files if os.path.abspath(f) not in cached_results]
+
     with concurrent.futures.ProcessPoolExecutor(max_workers=options.workers) as pool:
-        futures = {pool.submit(scan_file, full, options): full for full in files}
+        futures = {pool.submit(scan_file, full, options): full for full in to_scan}
         done = 0
+        for full in files:
+            cached = cached_results.get(os.path.abspath(full))
+            if cached is not None:
+                merge_one(full, cached)
+                done += 1
+                if progress:
+                    progress(done, tree.file_count, full, cached)
         for fut in concurrent.futures.as_completed(futures):
             full = futures[fut]
-            _merge_result(tree, full, fut.result(), options.split_selects)
+            result = fut.result()
+            merge_one(full, result)
             done += 1
             if progress:
-                progress(done, tree.file_count, full)
+                progress(done, tree.file_count, full, result)
     return tree

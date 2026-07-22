@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 
 from metchurial.models.findings import Finding
 from metchurial.models.identity import IdentityRow
+from metchurial.models.parse_stats import ParseStats
 from metchurial.models.references import ColumnUse, FunctionCall, TableUse
 from metchurial.models.relations import RelationEdge
 from metchurial.models.split import SplitManifestRow
@@ -17,7 +18,9 @@ from metchurial.models.split import SplitManifestRow
 class FileScanResult:
     """Everything scan_file() produces for one file. `bad_reason` is None
     on a normal scan; otherwise a short human-readable skip reason, with
-    every other field empty/zero."""
+    every other field empty/zero. `parse_stats` is None for a bad file or
+    a --incremental cache hit (no fresh ANTLR work happened this run to
+    report on) -- see cli.py's --verbose summary line."""
 
     findings: list[Finding] = field(default_factory=list)
     name_candidates: list[str] = field(default_factory=list)
@@ -29,6 +32,7 @@ class FileScanResult:
     function_calls: list[FunctionCall] = field(default_factory=list)
     identity_rows: list[IdentityRow] = field(default_factory=list)
     bad_reason: str | None = None
+    parse_stats: ParseStats | None = None
 
 
 @dataclass

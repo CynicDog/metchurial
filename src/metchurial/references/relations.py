@@ -1,7 +1,10 @@
 # -*- coding: utf-8 -*-
-"""JOIN relationship extraction (--extract-metadata), aggregated once for
-the whole scanned tree (a single global refs_relations.tsv, not one per
-directory).
+"""JOIN relationship extraction (--extract-metadata). refs_relations.tsv
+(write_relations_tsv) is one row per raw join-edge occurrence, file/line
+included, same convention as every other refs_*.tsv; aggregate_edges'
+cross-file table_a/table_b rollup, grouped without regard to which
+directory an edge came from, backs only summary.md's own "## Relations"
+overview section, a separate, coarser view.
 
 Two sources of join edges feed into this:
 
@@ -125,10 +128,13 @@ def aggregate_edges(edges: list[RelationEdge]) -> list[RelationRollup]:
     return rows
 
 
-def write_relations_tsv(path: str, aggregated: list[RelationRollup]) -> None:
-    """Same TSV conventions as tsv.write_refs_tsv (utf-8-sig,
-    tab-separated, header row always written even for an empty
-    `aggregated` list); each row's distinct predicates are joined with
-    '; ' into one column by the writer's sequence-cell convention."""
+def write_relations_tsv(path: str, edges: list[RelationEdge]) -> None:
+    """One row per raw JOIN edge occurrence -- same file/line-attributed
+    convention as refs_tables.tsv/refs_columns.tsv/refs_functions.tsv,
+    not the cross-file table_a/table_b rollup (that aggregated view is
+    summary.md's own "## Relations" section, via aggregate_edges() above;
+    this file is the detailed one a reader traces back to source with).
+    Same TSV conventions as tsv.write_refs_tsv (utf-8-sig, tab-separated,
+    header row always written even for an empty `edges` list)."""
     write_refs_tsv(path, ["table_a_schema", "table_a", "table_b_schema", "table_b",
-                          "join_count", "predicates"], aggregated)
+                          "join_type", "predicate", "file", "line"], edges)

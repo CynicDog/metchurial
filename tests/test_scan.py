@@ -452,6 +452,25 @@ class TestSameNameDifferentExtensionDeduped(unittest.TestCase):
         self.assertEqual(tree.file_count, 1)
         self.assertEqual(len(tree.findings), 1)
 
+    def test_bare_bak_sibling_never_wins_over_real_sql_file(self):
+        # "select_my_income.sql" and "select_my_income.bak" are the same
+        # length -- a length-only tie-break falls through to alphabetical
+        # order, where "bak" < "sql" would wrongly pick the backup copy
+        # and leave the real .sql file completely unscanned. Content is
+        # deliberately made to *differ* per-format below so the assertion
+        # can tell which file was actually chosen, not just that some file
+        # with matching findings was scanned.
+        self._write("select_my_income.sql",
+                    "SELECT * FROM t1 WHERE ACCT_ID = '1'; SELECT * FROM t2;")
+        self._write("select_my_income.bak", "not sql at all, just a stray same-named backup")
+        options = ScanOptions(extensions=("sql", "bak"), split_selects=True)
+        tree = scanner.scan_tree(self.d, options)
+        self.assertEqual(tree.file_count, 1)
+        remaining = set(os.listdir(self.d))
+        self.assertIn("select_my_income-01.sql", remaining)
+        self.assertIn("select_my_income-02.sql", remaining)
+        self.assertNotIn("select_my_income.bak", remaining)
+
     def test_bak_extension_not_scanned_unless_requested(self):
         text = "SELECT * FROM t1 WHERE ACCT_ID = '1';"
         self._write("query1.sql", text)
@@ -484,6 +503,33 @@ class TestSplitOutputNeverRescannedAsInput(unittest.TestCase):
         self.assertEqual(len(tree.findings), 1)
 
 
+class TestSplitOutputScannedOnceOriginalIsGone(unittest.TestCase):
+    """Once --split-selects has actually run and deleted the original
+    (the normal case -- see write_split_files), its split-output siblings
+    are the only copy of that data left on disk and must be scanned like
+    any other file on a later, separate run. Before this fix,
+    _matching_files excluded any -NN-suffixed name unconditionally, so a
+    plain --extract-metadata run after an earlier --split-selects run
+    found nothing for that file at all, forever."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        # simulates the post-split state: only the split outputs remain,
+        # the original ("report.sql") is already gone.
+        with open(os.path.join(self.d, "report-01.sql"), "w", encoding="utf-8") as f:
+            f.write("SELECT * FROM t1 WHERE ACCT_ID = '1';")
+        with open(os.path.join(self.d, "report-02.sql"), "w", encoding="utf-8") as f:
+            f.write("SELECT * FROM t2 WHERE ACCT_ID = '2';")
+
+    def tearDown(self):
+        shutil.rmtree(self.d)
+
+    def test_both_split_files_scanned_when_original_absent(self):
+        tree = scanner.scan_tree(self.d)
+        self.assertEqual(tree.file_count, 2)
+        self.assertEqual(len(tree.findings), 2)
+
+
 class TestSplitDeletesMatchingBackupSiblings(unittest.TestCase):
     """A .bak sibling of a file that --split-selects just split (and
     deleted) must be deleted too, purely by name -- no content comparison
@@ -514,9 +560,16 @@ class TestSplitDeletesMatchingBackupSiblings(unittest.TestCase):
         self.assertIn("query1-01.sql", remaining)
         self.assertIn("query1-02.sql", remaining)
 
-        # A later scan of the same tree finds nothing left to (re-)split.
+        # A later scan of the same tree finds the split files themselves
+        # (their original is gone, so they're ordinary input now -- see
+        # _is_stale_split_output), but nothing gets (re-)split: each is a
+        # single SELECT block on its own, and looks_like_split_output
+        # refuses to re-split an already-split file regardless.
         tree2 = scanner.scan_tree(self.d, options)
-        self.assertEqual(tree2.file_count, 0)
+        self.assertEqual(tree2.file_count, 2)
+        self.assertEqual(tree2.split_manifest, [])
+        remaining2 = set(os.listdir(self.d))
+        self.assertEqual(remaining2, {"query1-01.sql", "query1-02.sql"})
 
     def test_diverged_bak_sibling_deleted_too_by_name_alone(self):
         self._write("query1.sql", self.text)

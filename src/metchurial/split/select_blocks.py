@@ -100,6 +100,21 @@ def looks_like_split_output(filename: str) -> bool:
     return _SPLIT_SUFFIX_RE.search(os.path.basename(filename)) is not None
 
 
+def split_output_original_name(filename: str) -> str | None:
+    """If `filename` looks_like_split_output, returns the base name of the
+    original file it would have come from -- e.g. "report-01.sql" ->
+    "report.sql" -- by stripping the -NN suffix. Returns None otherwise.
+    Used by engine.py to tell a split file whose original still sits next
+    to it (the actual double-count risk) apart from one whose original is
+    long gone (write_split_files always deletes it once its split siblings
+    are written), which must be scanned like any other file."""
+    base = os.path.basename(filename)
+    m = _SPLIT_SUFFIX_RE.search(base)
+    if m is None:
+        return None
+    return base[:m.start()] + (m.group(1) or "")
+
+
 def write_split_files(path: str, text: str, all_tokens: list[Token],
                       ranges: list[tuple[int, int]]) -> list[str]:
     """path: the original file's path. For each range in `ranges`

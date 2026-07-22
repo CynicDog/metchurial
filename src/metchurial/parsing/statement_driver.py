@@ -44,16 +44,21 @@ valid, complete statements. Instead:
 
 from __future__ import annotations
 
+import bisect
 from typing import Any, Callable
 
 from antlr4 import CommonTokenStream, InputStream
 from antlr4.ListTokenSource import ListTokenSource
 from antlr4.Token import Token
+from antlr4.atn.PredictionMode import PredictionMode
 from antlr4.error.ErrorListener import ErrorListener
+from antlr4.error.ErrorStrategy import BailErrorStrategy
+from antlr4.error.Errors import ParseCancellationException
 
 from metchurial._generated.Db2Lexer import Db2Lexer
 from metchurial._generated.Db2Parser import Db2Parser
 from metchurial.models.options import DEFAULT_MAX_CHUNK_ITERATIONS
+from metchurial.models.parse_stats import ParseStats
 
 # Runtime bound, not a termination guarantee: the resync loop always
 # advances (Tier 3 skips at least one token per iteration), but each
@@ -128,7 +133,36 @@ def _make_chunk_stream(all_tokens: list[Token], start: int, end: int) -> CommonT
     return stream
 
 
-def _find_next_resync_point(stream: CommonTokenStream, from_index: int) -> tuple[int, str] | None:
+def _resync_anchors(stream: CommonTokenStream) -> list[tuple[int, str]]:
+    """Every Tier 2 anchor in `stream`, in one linear pass over the whole
+    chunk -- precomputed once per chunk rather than re-scanned from the
+    current position on every Tier 3 single-token retry. A chunk with few
+    or no anchors (e.g. a large multi-row VALUES(...) list, which has no
+    WHERE/ON/HAVING/nested-SELECT to anchor on at all) used to make
+    _find_next_resync_point rescan all the way to the end of the chunk on
+    every one of Tier 3's pos += 1 retries -- O(remaining tokens) repeated
+    once per token is O(n^2) in chunk size, the difference between
+    milliseconds and minutes on a large bulk INSERT.
+
+    Stored positions already encode each anchor's own offset (a WHERE/ON/
+    HAVING keyword's own index + 1, a SELECT's own index unmodified), and
+    are appended in strictly non-decreasing order since both offsets are
+    monotonic in the token index being scanned -- so the result is
+    already sorted by position, ready for bisecting in
+    _find_next_resync_point below."""
+    anchors = []
+    for i, tok in enumerate(stream.tokens):
+        if tok.channel != Token.DEFAULT_CHANNEL:
+            continue
+        if tok.type in _RESYNC_KEYWORDS:
+            anchors.append((i + 1, "search_condition"))
+        elif tok.type == Db2Lexer.SELECT:
+            anchors.append((i, "sql_statement"))
+    return anchors
+
+
+def _find_next_resync_point(anchor_positions: list[int], anchors: list[tuple[int, str]],
+                            from_index: int) -> tuple[int, str] | None:
     """Tier 2 anchor: whichever comes first of the next WHERE/ON/HAVING
     (parse a search_condition right after it) or the next SELECT strictly
     past from_index (parse a sql_statement at it -- a nested SELECT
@@ -136,16 +170,19 @@ def _find_next_resync_point(stream: CommonTokenStream, from_index: int) -> tuple
     declared name is a reserved word, is recovered whole this way instead
     of being leapfrogged by a farther WHERE/ON jump; SELECT at from_index
     itself is excluded since Tier 1 just proved it doesn't parse).
-    Returns (position, rule_name), or None."""
-    for i in range(from_index, len(stream.tokens)):
-        tok = stream.tokens[i]
-        if tok.channel != Token.DEFAULT_CHANNEL:
-            continue
-        if tok.type in _RESYNC_KEYWORDS:
-            return i + 1, "search_condition"
-        if tok.type == Db2Lexer.SELECT and i > from_index:
-            return i, "sql_statement"
-    return None
+    `anchor_positions`/`anchors`: _resync_anchors(stream)'s result, plus
+    its own positions pulled into a parallel list for bisect. Returns
+    (position, rule_name), or None."""
+    idx = bisect.bisect_left(anchor_positions, from_index)
+    # a SELECT anchor's position is its own token index (no +1 offset
+    # the way a WHERE/ON/HAVING anchor has), so an exact match at
+    # from_index is the one Tier 1 already just proved doesn't parse --
+    # skip it. A WHERE/ON/HAVING anchor can never land on this exact
+    # exclusion, since its stored position is already one past its own
+    # token index.
+    if idx < len(anchors) and anchors[idx] == (from_index, "sql_statement"):
+        idx += 1
+    return anchors[idx] if idx < len(anchors) else None
 
 
 def _try_parse(stream: CommonTokenStream, pos: int, rule_name: str) -> tuple[Any, bool]:
@@ -153,13 +190,50 @@ def _try_parse(stream: CommonTokenStream, pos: int, rule_name: str) -> tuple[Any
     consumed_ok) -- consumed_ok is True only if there were zero errors AND
     the stream actually advanced (a returned context object alone does
     not mean the parse was clean -- ANTLR can silently error-recover
-    through a rule and still return *something*)."""
+    through a rule and still return *something*).
+
+    predictionMode is pinned to SLL rather than ANTLR's default LL: this
+    grammar's flat `predicate` rule (see parsing/predicates.py) has many
+    alternatives sharing a long `expression` prefix, so default LL falls
+    back to full-context prediction (execATNWithFullContext) at each list
+    element to resolve the ambiguity -- fine for a handful of elements,
+    but a WHERE col IN (...) with tens of thousands of literals turns
+    that into tens of thousands of full-context predictions, the
+    difference between single-digit milliseconds and hours for one
+    statement. SLL is strictly weaker only at resolving which of several
+    *simultaneously valid* alternatives to prefer when the grammar is
+    genuinely ambiguous at that point (which alternative wins there makes
+    no difference to what gets extracted here); it does not accept input
+    LL would reject, and detects genuine syntax errors identically -- see
+    ANTLR's own recommended "two-stage parsing" strategy, which this
+    mirrors. Any input SLL genuinely can't make sense of still comes back
+    as ok=False here, same as any other syntax error, and falls through
+    to this module's own Tier 2/Tier 3 resync exactly as before.
+
+    errHandler is likewise pinned to BailErrorStrategy rather than
+    ANTLR's default: `ok` is already False on *any* reported error
+    (`not err.errors`), so whatever DefaultErrorStrategy's internal
+    recover()/consumeUntil() would have gone on to do after the first
+    error is guaranteed-discarded work -- for a rule with many small
+    internal mismatches (e.g. a multi-row VALUES clause the grammar
+    doesn't fully cover per row), that discarded recovery work is
+    exactly what turns one syntax error into thousands of token-by-token
+    resync attempts, and one file's scan into minutes. BailErrorStrategy
+    still reports the error to `err` (DefaultErrorStrategy.reportError
+    isn't overridden, only recover()) before raising
+    ParseCancellationException, so `ok`'s value is identical either way
+    -- only the cost of reaching it changes."""
     stream.seek(pos)
     parser = Db2Parser(stream)
+    parser._interp.predictionMode = PredictionMode.SLL
+    parser._errHandler = BailErrorStrategy()
     parser.removeErrorListeners()
     err = _CollectingErrorListener()
     parser.addErrorListener(err)
-    tree = getattr(parser, rule_name)()
+    try:
+        tree = getattr(parser, rule_name)()
+    except ParseCancellationException:
+        return None, False
     ok = not err.errors and stream.index > pos
     return (tree if ok else None), ok
 
@@ -167,7 +241,8 @@ def _try_parse(stream: CommonTokenStream, pos: int, rule_name: str) -> tuple[Any
 def parse_chunk(all_tokens: list[Token], start: int, end: int, visitor: Any,
                  token_scan_fallback: Callable[[CommonTokenStream, int], tuple[int, Callable[[], None] | None]],
                  max_iterations: int = MAX_ITERATIONS_PER_CHUNK,
-                 extra_visitors: tuple[Any, ...] = ()) -> None:
+                 extra_visitors: tuple[Any, ...] = (),
+                 stats: ParseStats | None = None) -> None:
     """Run the tiered resync loop over one chunk. `visitor` is an
     ExtractorVisitor (or compatible) -- `visitor.visit(tree)` is called
     for every fragment successfully parsed via Tier 1's structural
@@ -182,16 +257,26 @@ def parse_chunk(all_tokens: list[Token], start: int, end: int, visitor: Any,
     `extra_visitors` -- additional visitor(s) (e.g. reference_visitor.py's
     ReferenceVisitor) that also get `.visit(tree)` called on every tree
     this chunk's tiered loop successfully commits, alongside `visitor`;
-    see parse_file's `pre_chunk_hook` for how these get constructed."""
+    see parse_file's `pre_chunk_hook` for how these get constructed.
+    `stats`, if given, is updated in place with this chunk's iteration
+    count and how each iteration resolved -- see --verbose's summary line
+    (models/parse_stats.py); a caller not interested in that (e.g.
+    comment_rescan.py) simply omits it, at zero cost."""
     stream = _make_chunk_stream(all_tokens, start, end)
     n_tokens = len(stream.tokens)
     pos = 0
     iterations = 0
+    resync_anchors = _resync_anchors(stream)
+    resync_anchor_positions = [a[0] for a in resync_anchors]
+    if stats is not None:
+        stats.chunks += 1
 
     while pos < n_tokens and stream.tokens[pos].type != Token.EOF:
         iterations += 1
         if iterations > max_iterations:
             break
+        if stats is not None:
+            stats.iterations += 1
 
         # Normalize pos to the next real (default-channel) token before
         # racing the three candidates. sql_statement()/search_condition()
@@ -236,18 +321,24 @@ def parse_chunk(all_tokens: list[Token], start: int, end: int, visitor: Any,
                 visitor.visit(cond_tree)
                 for extra in extra_visitors:
                     extra.visit(cond_tree)
+                if stats is not None:
+                    stats.tier1_structural += 1
             elif best_kind == "stmt":
                 visitor.visit(stmt_tree)
                 for extra in extra_visitors:
                     extra.visit(stmt_tree)
+                if stats is not None:
+                    stats.tier1_structural += 1
             else:
                 scan_commit()
+                if stats is not None:
+                    stats.tier1_token_scan += 1
             pos += best_consumed
             continue
 
         # Tier 2 (only reached if nothing in Tier 1 made any progress):
         # scan forward for the next resync anchor and parse from it.
-        resync = _find_next_resync_point(stream, pos)
+        resync = _find_next_resync_point(resync_anchor_positions, resync_anchors, pos)
         if resync is not None:
             resync_at, resync_rule = resync
             tree, ok = _try_parse(stream, resync_at, resync_rule)
@@ -256,10 +347,14 @@ def parse_chunk(all_tokens: list[Token], start: int, end: int, visitor: Any,
                 for extra in extra_visitors:
                     extra.visit(tree)
                 pos = stream.index
+                if stats is not None:
+                    stats.tier2_resync += 1
                 continue
 
         # Tier 3: safety valve -- guaranteed progress
         pos += 1
+        if stats is not None:
+            stats.tier3_skip += 1
 
 
 def parse_file(text: str, visitor: Any,
@@ -267,6 +362,7 @@ def parse_file(text: str, visitor: Any,
                max_iterations_per_chunk: int = MAX_ITERATIONS_PER_CHUNK,
                pre_chunk_hook: Callable[[list[Token], int, int], tuple[Any, ...]] | None = None,
                lexed: tuple[list[Token], list[tuple[int, int, str]]] | None = None,
+               stats: ParseStats | None = None,
                ) -> tuple[list[Token], list[tuple[int, int, str]]]:
     """Top-level entry point: lex once, split into chunks, run the tiered
     driver over each. Returns (all_tokens, lexer_errors) so callers (e.g.
@@ -285,11 +381,12 @@ def parse_file(text: str, visitor: Any,
     ReferenceVisitor) to be run alongside `visitor` for this chunk only.
     comment_rescan.py's own parse_file() calls don't pass this, so
     reference/relation extraction inside comments is out of scope, a
-    known limitation."""
+    known limitation. `stats`, if given, accumulates across every chunk
+    in the file -- see parse_chunk."""
     all_tokens, lexer_errors = lexed if lexed is not None else lex_file(text)
     for start, end in chunk_ranges(all_tokens):
         extra_visitors = pre_chunk_hook(all_tokens, start, end) if pre_chunk_hook else ()
         parse_chunk(all_tokens, start, end, visitor, token_scan_fallback,
                     max_iterations=max_iterations_per_chunk,
-                    extra_visitors=extra_visitors)
+                    extra_visitors=extra_visitors, stats=stats)
     return all_tokens, lexer_errors
