@@ -8,10 +8,10 @@ join, a flipped join type) even though they landed on different
 it's the one O(n²) pass in the whole tool.
 
 This document covers what similarity is computed over, the exact scoring
-algorithm, and worked examples (real, computed values from this repo's
-own test fixtures) showing how the score moves as the underlying SQL
-changes. Read [query-identity.md](query-identity.md) first if you haven't
-— this feature is best understood as identity's finer-grained
+algorithm, and a worked example (real, computed values from actually
+running the implementation) showing how the score moves as the underlying
+SQL changes. Read [query-identity.md](query-identity.md) first if you
+haven't — this feature is best understood as identity's finer-grained
 complement, not a replacement for it.
 
 ## Purpose
@@ -46,9 +46,10 @@ already failed to collapse into the same `core_id` on tables/joins alone.
 
 One consequence worth being explicit about: **two statements that share a
 `core_id` are never scored against each other**, even though their full
-fact sets can differ (that's exactly the `25_query_identity_predicate_
-variant.sql` case in query-identity.md's worked example — same `core_id`
-as the base, different `fact_set`). `compute_similarity` takes one
+fact sets can differ (that's exactly the "`WHERE`/`GROUP BY` rewritten
+entirely" case in [query-identity.md](query-identity.md)'s worked example
+— same `core_id` as the base, different `fact_set`). `compute_similarity`
+takes one
 representative fact set per distinct `core_id` before scoring any pairs,
 so same-`core_id` statements collapse into a single representative first
 and are structurally incapable of being compared to each other by this
@@ -79,19 +80,20 @@ into `--extract-metadata` itself.
 
 ## Worked example: how the score moves as the fact set changes
 
-All numbers below come from actually running `compute_similarity`/
-`_jaccard` over this repo's own stress-corpus fixtures
-(`tests/fixtures/20-37`) — not hand-computed.
+This continues [query-identity.md](query-identity.md)'s worked example —
+same base query, same variants, real numbers from actually running
+`compute_similarity`/`_jaccard` against them, not hand-computed.
 
-Base query (`20_query_identity_base.sql`, `core_id` `88499a34355030b2`)
-has 13 full facts: 4 `TBL`, 2 `JOINTYPE`, 3 `REL`, 3 `PRED`, 1 `SHAPE`.
+The base query (4 tables, joined by two `INNER`s and one `LEFT OUTER`,
+`core_id 88499a34355030b2`) has 13 full facts: 4 `TBL`, 2 `JOINTYPE`, 3
+`REL`, 3 `PRED`, 1 `SHAPE`.
 
 | Compared against | Its `core_id` | What changed | Shared facts | Similarity | Read as |
 |---|---|---|---|---|---|
-| `25_query_identity_predicate_variant.sql` | `88499a34355030b2` (**same as base**) | `WHERE`/`GROUP BY` rewritten | 10 / 13 ∪ 12 = 15 | 0.667 | Same core query (never actually scored by `--query-similarity` — see above; shown here only to demonstrate that `fact_set` still differs even on a shared `core_id`) |
-| `32_query_near_miss_join_type_change.sql` | `c776b2874f3f34d5` | One join `LEFT`→`INNER` | 11 / 14 | **0.786** | Highest score among the distinct-`core_id` cases — smallest possible structural edit |
-| `24_query_near_miss_extra_join.sql` | `a421ecfeb3c7f8ac` | One extra `JOIN TBCODE` added | 12 / 16 | 0.750 | Clearly related — same base + one added edge |
-| `34_query_identity_core_b_base.sql` | `c818abc3f123eed0` | Unrelated domain (HR tables) | 2 / 22 | 0.091 | Below threshold — correctly scores as unrelated |
+| `WHERE`/`GROUP BY` rewritten entirely | `88499a34355030b2` (**same as base**) | Filter/grouping only | 10 shared / 15 union | 0.667 | Same core query (never actually scored by `--query-similarity` — see above; shown here only to demonstrate that `fact_set` still differs even on a shared `core_id`) |
+| `TBSTAT`'s join flipped `LEFT OUTER`→`INNER` | `c776b2874f3f34d5` | One join type | 11 shared / 14 union | **0.786** | Highest score among the distinct-`core_id` cases — smallest possible structural edit |
+| One additional table joined in (`TBCODE`) | `a421ecfeb3c7f8ac` | One extra `JOIN` | 12 shared / 16 union | 0.750 | Clearly related — same base + one added edge |
+| Entirely different domain (zero table overlap) | `c818abc3f123eed0` | Everything | 2 shared / 22 union | 0.091 | Below threshold — correctly scores as unrelated |
 
 The ordering makes the intuition concrete: **flipping one join's type is
 a smaller structural edit than adding a whole new joined table**, and
@@ -100,8 +102,7 @@ either statement sharing the base's `core_id`.
 
 ### Reading `only_in_a` / `only_in_b`
 
-For the join-type-flip pair above (base vs.
-`32_query_near_miss_join_type_change.sql`):
+For the join-type-flip pair above (base vs. the `LEFT`→`INNER` variant):
 
 | Column | Value |
 |---|---|
@@ -111,17 +112,16 @@ For the join-type-flip pair above (base vs.
 Every `TBL`/`REL`/`PRED` fact is identical between the two — the *entire*
 symmetric difference is the `JOINTYPE` multiset shifting from
 `{INNER: 2, LEFT: 1}` to `{INNER: 3}`, which is exactly the one-keyword
-edit (`LEFT OUTER JOIN` → `INNER JOIN`) the fixture makes. A reader
+edit (`LEFT OUTER JOIN` → `INNER JOIN`) the variant makes. A reader
 scanning `refs_query_similarity.tsv` sees this and immediately knows *what
 changed*, not just that something did.
 
-For the near-miss with an unrelated domain (base vs.
-`34_query_identity_core_b_base.sql`), `only_in_a`/`only_in_b` list every
-single fact on each side — all 11 base facts and all 9 of the other's,
-zero overlap beyond `SHAPE|BLOCKS=1` and one shared `JOINTYPE` count. That
-near-total symmetric difference is what a 0.091 score looks like in
-practice: two statements with almost nothing in common beyond both being
-one-block SELECTs with a couple of joins.
+For the near-miss with an unrelated domain, `only_in_a`/`only_in_b` list
+every single fact on each side — all 11 base facts and all 9 of the
+other's, zero overlap beyond `SHAPE|BLOCKS=1` and one shared `JOINTYPE`
+count. That near-total symmetric difference is what a 0.091 score looks
+like in practice: two statements with almost nothing in common beyond
+both being one-block SELECTs with a couple of joins.
 
 ## Output: `refs_query_similarity.tsv`
 

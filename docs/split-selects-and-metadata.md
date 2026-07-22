@@ -267,47 +267,74 @@ occurrence, not just ones inside a comparison:
 ### Worked example: one file through the whole pipeline
 
 Running full `--extract-metadata` extraction (table refs, column refs,
-relations, functions) against `tests/fixtures/20_query_identity_base.sql`
-— four tables joined by two `INNER`s and one `LEFT OUTER`, filtered on
-three predicates — produces (real output, not illustrative):
+relations, functions) against this statement —
+
+```sql
+SELECT
+    A.ACCT_ID,
+    B.CTRT_NO,
+    C.STAT_CD,
+    D.TBSAMPLE001,
+    CASE
+        WHEN B.CTRT_TYPE_CD = '01' THEN B.BASE_AMT * 1.05
+        WHEN B.CTRT_TYPE_CD = '02' THEN B.BASE_AMT * 1.10
+        ELSE B.BASE_AMT
+    END AS ADJ_AMT
+FROM TBACCT A
+INNER JOIN TBCTRT B
+    ON A.ACCT_ID = B.ACCT_ID
+LEFT OUTER JOIN TBSTAT C
+    ON B.CTRT_NO = C.CTRT_NO
+JOIN TBSAMPLE001 D
+    ON A.ACCT_ID = D.ACCT_ID
+WHERE C.STAT_CD IN ('01', '02')
+  AND B.CTRT_TYPE_CD <> '99'
+  AND A.OPEN_DT BETWEEN '20200101' AND '20261231'
+GROUP BY A.ACCT_ID, B.CTRT_NO, C.STAT_CD, D.TBSAMPLE001, B.CTRT_TYPE_CD, B.BASE_AMT;
+```
+
+— the same base query [query-identity.md](query-identity.md) and
+[query-similarity.md](query-similarity.md) use in their own worked
+examples — produces (real output, not illustrative; line numbers assume
+this statement starts at line 1 of its own file):
 
 **`refs_tables.tsv`** (`table_uses`):
 
 | schema | table | line |
 |---|---|---|
-| (no-schema) | TBACCT | 17 |
-| (no-schema) | TBCTRT | 18 |
-| (no-schema) | TBSTAT | 20 |
-| (no-schema) | TBSAMPLE001 | 22 |
+| (no-schema) | TBACCT | 11 |
+| (no-schema) | TBCTRT | 12 |
+| (no-schema) | TBSTAT | 14 |
+| (no-schema) | TBSAMPLE001 | 16 |
 
 **`refs_relations.tsv`** (`relation_edges`):
 
 | table_a | join_type | table_b | predicate | line |
 |---|---|---|---|---|
-| TBACCT | INNER | TBCTRT | `A.ACCT_ID = B.ACCT_ID` | 17 |
-| TBCTRT | LEFT | TBSTAT | `B.CTRT_NO = C.CTRT_NO` | 18 |
-| TBACCT | JOIN | TBSAMPLE001 | `A.ACCT_ID = D.ACCT_ID` | 17 |
+| TBACCT | INNER | TBCTRT | `A.ACCT_ID = B.ACCT_ID` | 11 |
+| TBCTRT | LEFT | TBSTAT | `B.CTRT_NO = C.CTRT_NO` | 12 |
+| TBACCT | JOIN | TBSAMPLE001 | `A.ACCT_ID = D.ACCT_ID` | 11 |
 
 **`refs_functions.tsv`** (`function_calls` — predicate operators count as
 "function-shaped" usage here too):
 
 | function | parameters | line |
 |---|---|---|
-| `=` | `A.ACCT_ID, B.ACCT_ID` | 19 |
-| `=` | `B.CTRT_NO, C.CTRT_NO` | 21 |
-| `=` | `A.ACCT_ID, D.ACCT_ID` | 23 |
-| `IN` | `C.STAT_CD, ('01', '02')` | 24 |
-| `<>` | `B.CTRT_TYPE_CD, '99'` | 25 |
-| `BETWEEN` | `A.OPEN_DT, '20200101', '20261231'` | 26 |
+| `=` | `A.ACCT_ID, B.ACCT_ID` | 13 |
+| `=` | `B.CTRT_NO, C.CTRT_NO` | 15 |
+| `=` | `A.ACCT_ID, D.ACCT_ID` | 17 |
+| `IN` | `C.STAT_CD, ('01', '02')` | 18 |
+| `<>` | `B.CTRT_TYPE_CD, '99'` | 19 |
+| `BETWEEN` | `A.OPEN_DT, '20200101', '20261231'` | 20 |
 
 **`refs_columns.tsv`** (`column_uses`, first few rows):
 
 | schema | table | column | line |
 |---|---|---|---|
-| (no-schema) | TBACCT | ACCT_ID | 19 |
-| (no-schema) | TBCTRT | ACCT_ID | 19 |
-| (no-schema) | TBCTRT | CTRT_NO | 21 |
-| (no-schema) | TBSTAT | CTRT_NO | 21 |
+| (no-schema) | TBACCT | ACCT_ID | 13 |
+| (no-schema) | TBCTRT | ACCT_ID | 13 |
+| (no-schema) | TBCTRT | CTRT_NO | 15 |
+| (no-schema) | TBSTAT | CTRT_NO | 15 |
 
 Every one of these rows traces back to the same two-pass token-scan
 (`scan_query_blocks`) plus the parser-tree visitors described above,

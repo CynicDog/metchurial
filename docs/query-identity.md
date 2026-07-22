@@ -8,11 +8,12 @@ calculated — collapse onto the same `core_id`. Statements that touch
 different tables, or join them differently, get different ones.
 
 This document covers *why* `core_id` exists, exactly what it hashes, and
-worked examples (with real, computed values from this repo's own test
-fixtures) showing how a change to a query's SQL does or doesn't move its
-`core_id`. See [query-similarity.md](query-similarity.md) for the
-companion feature that scores statements which *don't* share a `core_id`
-against each other, and the last section below for how the two relate.
+a worked example — an illustrative query run through the actual
+implementation, with its real computed `core_id` values — showing how a
+change to a query's SQL does or doesn't move its `core_id`. See
+[query-similarity.md](query-similarity.md) for the companion feature that
+scores statements which *don't* share a `core_id` against each other, and
+the last section below for how the two relate.
 
 ## Purpose
 
@@ -102,41 +103,68 @@ not what *identity* discriminates on.
 
 ## Worked example: how `core_id` changes as the fact set changes
 
-All values below are real output from this repo's own stress-corpus
-fixtures (`tests/fixtures/20-37`), computed by actually running
-`scan_file(..., ScanOptions(extract_query_identity=True))` — not
-hand-simulated.
+The base query below, and every variant of it in this section, are real
+SQL run through the actual implementation
+(`scan_file(..., ScanOptions(extract_query_identity=True))`) — the
+`core_id` values shown are genuine computed output, not invented. `ACCT`/
+`CTRT`/`STAT`/`SAMPLE` are placeholder table names (account/contract/
+status/sample-attribute); swap in your own schema mentally, the mechanics
+don't change.
 
-Base query (`20_query_identity_base.sql`): `TBACCT`/`TBCTRT`/`TBSTAT`/
-`TBSAMPLE001` joined by two `INNER`s and one `LEFT OUTER`, filtered on
-`STAT_CD IN (...)`, `CTRT_TYPE_CD <> '99'`, `OPEN_DT BETWEEN ...`, grouped
-by five columns.
-
-| Fixture | What changed vs. the base | `core_id` | Same as base? |
-|---|---|---|---|
-| `20_query_identity_base.sql` | — (base) | `88499a34355030b2` | — |
-| `21_query_identity_alias_variant.sql` | Table aliases renamed | `88499a34355030b2` | **Yes** |
-| `22_query_identity_extra_column.sql` | One extra SELECT-list column | `88499a34355030b2` | **Yes** |
-| `23_query_identity_derived_column_variant.sql` | Derived-column (`CASE`) arithmetic changed | `88499a34355030b2` | **Yes** |
-| `25_query_identity_predicate_variant.sql` | `WHERE`/`GROUP BY` predicates rewritten entirely (see below) | `88499a34355030b2` | **Yes** |
-| `30_query_identity_comma_join_variant.sql` | One `JOIN...ON` rewritten as a comma-join + `WHERE` equality | `88499a34355030b2` | **Yes** |
-| `31_query_identity_join_order_variant.sql` | FROM-clause join order permuted | `88499a34355030b2` | **Yes** |
-| `24_query_near_miss_extra_join.sql` | One additional `LEFT OUTER JOIN TBCODE` added | `a421ecfeb3c7f8ac` | No |
-| `32_query_near_miss_join_type_change.sql` | `TBSTAT`'s join flipped `LEFT OUTER`→`INNER` | `c776b2874f3f34d5` | No |
-| `34_query_identity_core_b_base.sql` | Entirely different domain (HR tables, zero overlap) | `c818abc3f123eed0` | No |
-| `27_query_distinct_single_table.sql` | Single table, no joins at all | `a19c38a2b3e49b39` | No |
-
-`25_query_identity_predicate_variant.sql` is the sharpest illustration of
-"condensed grouping": its `WHERE`/`GROUP BY` clauses are genuinely
-different from the base's —
+**Base query:**
 
 ```sql
--- base (20):
+SELECT
+    A.ACCT_ID,
+    B.CTRT_NO,
+    C.STAT_CD,
+    D.TBSAMPLE001,
+    CASE
+        WHEN B.CTRT_TYPE_CD = '01' THEN B.BASE_AMT * 1.05
+        WHEN B.CTRT_TYPE_CD = '02' THEN B.BASE_AMT * 1.10
+        ELSE B.BASE_AMT
+    END AS ADJ_AMT
+FROM TBACCT A
+INNER JOIN TBCTRT B
+    ON A.ACCT_ID = B.ACCT_ID
+LEFT OUTER JOIN TBSTAT C
+    ON B.CTRT_NO = C.CTRT_NO
+JOIN TBSAMPLE001 D
+    ON A.ACCT_ID = D.ACCT_ID
+WHERE C.STAT_CD IN ('01', '02')
+  AND B.CTRT_TYPE_CD <> '99'
+  AND A.OPEN_DT BETWEEN '20200101' AND '20261231'
+GROUP BY A.ACCT_ID, B.CTRT_NO, C.STAT_CD, D.TBSAMPLE001, B.CTRT_TYPE_CD, B.BASE_AMT;
+```
+
+This resolves to `core_id 88499a34355030b2` — 4 `TBL`, 2 `JOINTYPE`, 3
+`REL`, 3 `PRED`, 1 `SHAPE` fact (13 facts total).
+
+| Variant | What changed vs. the base | `core_id` | Same as base? |
+|---|---|---|---|
+| *(base, above)* | — | `88499a34355030b2` | — |
+| Aliases renamed (`A`→`ACC`, `B`→`CON`, ...) | Cosmetic only | `88499a34355030b2` | **Yes** |
+| One extra SELECT-list column added | SELECT-list projection never contributes a fact | `88499a34355030b2` | **Yes** |
+| `CASE` arithmetic recalculated differently | Only referenced columns matter, not the formula | `88499a34355030b2` | **Yes** |
+| `WHERE`/`GROUP BY` rewritten entirely (see below) | All differences are `PRED\|`/`GROUPBY\|` facts | `88499a34355030b2` | **Yes** |
+| One `JOIN...ON` rewritten as a comma-join + `WHERE` equality | Resolves to the same `REL`/`JOINTYPE` facts | `88499a34355030b2` | **Yes** |
+| FROM-clause join order permuted | Facts are sets, not sequences | `88499a34355030b2` | **Yes** |
+| One additional table joined in (e.g. `LEFT OUTER JOIN TBCODE E ON B.CTRT_TYPE_CD = E.CODE_CD`) | New `TBL\|`/`REL\|` fact — genuine topology change | `a421ecfeb3c7f8ac` | No |
+| `TBSTAT`'s join flipped `LEFT OUTER`→`INNER` | `JOINTYPE\|` multiset count shifts | `c776b2874f3f34d5` | No |
+| Entirely different domain/tables (zero table overlap) | Disjoint `TBL`/`REL` facts | `c818abc3f123eed0` | No |
+| Single table only, no joins at all | Missing `REL`/`JOINTYPE` facts entirely | `a19c38a2b3e49b39` | No |
+
+The "`WHERE`/`GROUP BY` rewritten entirely" row is the sharpest
+illustration of "condensed grouping" — its filter is genuinely different
+from the base's, not just reformatted:
+
+```sql
+-- base:
 WHERE C.STAT_CD IN ('01', '02')
   AND B.CTRT_TYPE_CD <> '99'
   AND A.OPEN_DT BETWEEN '20200101' AND '20261231'
 
--- variant (25):
+-- variant:
 WHERE C.STAT_CD = '01'
   AND A.CHANNEL_CD = 'WEB'
 ```
@@ -148,11 +176,11 @@ though (three `PRED` facts differ each way) — that's the difference
 `--query-similarity` reports (Jaccard 0.667 between the two, see
 [query-similarity.md](query-similarity.md)'s worked example).
 
-By contrast, `24_query_near_miss_extra_join.sql` adds one extra table via
-one extra `JOIN`. That's a genuine topology change — one new `TBL|` fact
-(`TBL|(no-schema)|TBCODE`) and one new `REL|` fact — so it gets its own,
-different `core_id`, even though eleven of its thirteen full facts are
-identical to the base's.
+By contrast, the "one additional table joined in" row adds one extra
+table via one extra `JOIN`. That's a genuine topology change — one new
+`TBL|` fact and one new `REL|` fact — so it gets its own, different
+`core_id`, even though eleven of its thirteen full facts are identical to
+the base's.
 
 ## Supplementary fields (never read back into `core_id`)
 
@@ -201,4 +229,4 @@ underlying data, deliberately kept separate:
   does, without re-inflating the distinct-core-query count to do it.
 
 See [query-similarity.md](query-similarity.md) for that computation in
-full, with the same fixtures' actual similarity scores worked through.
+full, worked through against the same example query above.
