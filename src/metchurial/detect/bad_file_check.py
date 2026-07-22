@@ -35,21 +35,75 @@ LEXER_ERROR_RATIO_THRESHOLD = 0.25
 # individually fail to make sense of.
 MIN_PUNCTUATION_RUN = 6
 
+# How much of the matched run to echo back in the reason string. Long
+# enough to make '========' vs '--------' vs '........' visually obvious
+# at a glance, short enough not to dump an entire divider line.
+_RUN_PREVIEW_MAX_CHARS = 20
 
-def _longest_repeated_punct_run(tokens: list[Token]) -> int:
-    best = 0
-    current = 0
+
+def _longest_repeated_punct_run(all_tokens: list[Token]) -> tuple[int, str]:
+    """Returns (run_length, source_text) for the longest run of identical
+    single-character punctuation tokens that are contiguous *in the
+    source*, not just adjacent in the token list.
+
+    That distinction matters: a lexer error consumes source text without
+    emitting any token for it, so bare non-ASCII prose sitting directly in
+    the file body (e.g. Korean sentences, each word its own lexer error --
+    see check_file_quality's ratio check just above) simply vanishes from
+    `all_tokens`. Two sentence-ending periods that are actually paragraphs
+    apart in the source end up back-to-back in the filtered token list,
+    which used to make ordinary Korean prose look exactly like a
+    decorative divider. Tracking each token's source offset and resetting
+    the run whenever a gap opens up (i.e. some span of source text was
+    swallowed by a lexer error rather than tokenized) fixes that without
+    special-casing Korean or any other script -- a real divider like
+    `========` or a spaced-out `- - - - -` has no such gap, since every
+    character in it, punctuation or separating whitespace, is accounted
+    for by a token.
+    """
+    best_len = 0
+    best_range: tuple[int, int] | None = None
+    run_len = 0
+    run_start_idx = 0
     prev_type = None
-    for t in tokens:
-        if t.channel != Token.DEFAULT_CHANNEL:
+    expected_pos = 0
+    for i, t in enumerate(all_tokens):
+        if t.type == Token.EOF:
             continue
-        if len(t.text) == 1 and not t.text.isalnum() and t.type == prev_type:
-            current += 1
-        else:
-            current = 1
+        contiguous = t.start == expected_pos
+        expected_pos = t.stop + 1
+        if t.channel != Token.DEFAULT_CHANNEL:
+            # Whitespace/comments don't break a spaced-out divider, but
+            # only if nothing was swallowed just before them either.
+            if not contiguous:
+                run_len = 0
+                prev_type = None
+            continue
+        is_punct = len(t.text) == 1 and not t.text.isalnum()
+        if is_punct and contiguous and t.type == prev_type:
+            run_len += 1
+        elif is_punct:
+            run_len = 1
+            run_start_idx = i
             prev_type = t.type
-        best = max(best, current)
-    return best
+        else:
+            run_len = 0
+            prev_type = None
+        if is_punct and run_len > best_len:
+            best_len = run_len
+            best_range = (run_start_idx, i)
+
+    if best_range is None:
+        return 0, ""
+    start_idx, end_idx = best_range
+    snippet = "".join(tok.text for tok in all_tokens[start_idx:end_idx + 1])
+    return best_len, snippet
+
+
+def _preview(text: str) -> str:
+    if len(text) > _RUN_PREVIEW_MAX_CHARS:
+        return text[:_RUN_PREVIEW_MAX_CHARS] + "..."
+    return text
 
 
 def check_file_quality(all_tokens: list[Token],
@@ -69,10 +123,10 @@ def check_file_quality(all_tokens: list[Token],
                "non-ASCII section headers, mixed directly into the file body rather "
                "than inside a comment)").format(ratio)
 
-    run = _longest_repeated_punct_run(all_tokens)
+    run, run_text = _longest_repeated_punct_run(all_tokens)
     if run >= MIN_PUNCTUATION_RUN:
-        return ("found a run of {} repeated punctuation characters in a row "
-               "(likely a decorative divider line such as '========', not real SQL)"
-               ).format(run)
+        return ("found a run of {} repeated punctuation characters in a row: '{}' "
+               "(likely a decorative divider line, not real SQL)"
+               ).format(run, _preview(run_text))
 
     return None

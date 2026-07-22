@@ -26,7 +26,11 @@ def _check(sql):
 class TestDividerDetection(unittest.TestCase):
     def test_long_equals_divider_is_flagged(self):
         sql = "========================================\nSELECT * FROM t1;\n"
-        self.assertIsNotNone(_check(sql))
+        reason = _check(sql)
+        self.assertIsNotNone(reason)
+        # The reason should echo back what was actually matched, not just
+        # a bare count, so it's obvious at a glance what tripped it.
+        self.assertIn("====", reason)
 
     def test_short_run_is_not_flagged(self):
         # A handful of repeated characters (e.g. "=="  from some odd
@@ -34,6 +38,39 @@ class TestDividerDetection(unittest.TestCase):
         # runs should.
         sql = "SELECT * FROM t1 WHERE x == 1;\n"
         self.assertIsNone(_check(sql))
+
+
+class TestPunctuationRunIgnoresSwallowedText(unittest.TestCase):
+    """A lexer error consumes source text without emitting a token for
+    it, so punctuation that is actually far apart in the source -- e.g.
+    sentence-ending periods separated by bare, untokenizable Korean prose
+    -- must not look like a contiguous divider just because nothing sits
+    between the periods in the filtered token list."""
+
+    def test_korean_prose_periods_are_not_a_divider(self):
+        sql = (
+            "SELECT A1, A2, A3, A4, A5, A6, A7, A8, A9, A10\n"
+            "FROM TABLE1\n"
+            "WHERE COND1 = 1 AND COND2 = 2 AND COND3 = 3\n"
+            "검토 완료. 배포 대기. 참고 요망. 문의 채널. 확인 필요. 승인 대기.\n"
+            "SELECT A1, A2, A3, A4, A5, A6, A7, A8, A9, A10\n"
+            "FROM TABLE1\n"
+            "WHERE COND1 = 1 AND COND2 = 2 AND COND3 = 3\n"
+        )
+        self.assertIsNone(_check(sql))
+
+    def test_korean_quoted_string_list_is_not_a_divider(self):
+        sql = "SELECT * FROM T WHERE COL IN ('가','나','다','라','마','바','사')"
+        self.assertIsNone(_check(sql))
+
+    def test_spaced_out_divider_is_still_flagged(self):
+        # A real divider can be spaced out ('- - - - - - -') without any
+        # swallowed content between the dashes -- that's genuinely
+        # contiguous source, so it must still be caught.
+        sql = "- - - - - - -\nSELECT 1 FROM T1;\n"
+        reason = _check(sql)
+        self.assertIsNotNone(reason)
+        self.assertIn("divider", reason)
 
 
 class TestLexerErrorRatio(unittest.TestCase):
