@@ -50,9 +50,9 @@ purpose:
 
 | Prefix | Example | Meaning |
 |---|---|---|
-| `TBL\|schema\|table` | `TBL\|(no-schema)\|TBACCT` | A real table referenced, alias resolved away |
+| `TBL\|schema\|table` | `TBL\|(no-schema)\|TBACCT` | **Every** real table referenced, alias resolved away — one fact per table, whether or not it's joined to anything |
 | `JOINTYPE\|type=n` | `JOINTYPE\|LEFT=1` | Join-type multiset (`JOIN`/`INNER`/comma-join collapse to `INNER`; `LEFT`/`RIGHT`/`FULL`/`CROSS` stay distinct) |
-| `REL\|op\|t1.c1\|t2.c2` | `REL\|=\|TBACCT.ACCT_ID\|TBCTRT.ACCT_ID` | A comparison joining two distinct tables (pair-sorted), from `ON` clauses and comma-join `WHERE` equalities alike |
+| `REL\|op\|t1.c1\|t2.c2` | `REL\|=\|TBACCT.ACCT_ID\|TBCTRT.ACCT_ID` | A comparison *connecting* two distinct tables (pair-sorted), from `ON` clauses and comma-join `WHERE` equalities alike — a separate signal from `TBL` about *how* two already-recorded tables relate, not a substitute for recording them |
 | `PRED\|operand\|op` | `PRED\|TBSTAT.STAT_CD\|IN` | One `WHERE` filter predicate's operand signature + operator |
 | `GROUPBY\|operand` | `GROUPBY\|TBACCT.ACCT_ID` | One `GROUP BY` item, same operand signature |
 | `SHAPE\|BLOCKS=n` | `SHAPE\|BLOCKS=1` | Total query-block count (outer block + every CTE body/derived-table subquery) |
