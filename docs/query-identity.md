@@ -3,9 +3,14 @@
 `--extract-metadata` assigns every SQL statement a `core_id`: a short,
 deterministic hash of that statement's structural signature. Statements
 that are the same underlying query — differing only in things like
-aliasing, which columns get selected, or how a derived column is
-calculated — collapse onto the same `core_id`. Statements that touch
-different tables, or join them differently, get different ones.
+aliasing, which columns get selected, how a derived column is calculated,
+**or their `WHERE`/`GROUP BY` clauses** — collapse onto the same
+`core_id`. Statements that touch different tables, or join them
+differently, get different ones. That `WHERE`/`GROUP BY` exclusion is
+deliberate and load-bearing (see "Condensed grouping" below) — `core_id`
+is hashed from only four of the six fact categories a statement is
+reduced to; predicates and grouping are dropped on purpose, not an
+oversight.
 
 This document covers *why* `core_id` exists, exactly what it hashes, and
 a worked example — an illustrative query run through the actual
@@ -34,10 +39,14 @@ core queries**, not a long list of near-duplicates re-inflated back
 toward the file count — which is exactly what happens if identity is too
 strict (see "Condensed grouping" below).
 
-## The fact set
+## The full fact set
 
 Every statement is reduced to a set of canonical fact strings — the
-*full* fact set — with six categories:
+*full* fact set — with six categories. **Not all six feed into `core_id`
+itself** — this table is the complete vocabulary a statement is reduced
+to; the next section ("Condensed grouping") narrows it down to the four
+categories `core_id` actually hashes, dropping `PRED`/`GROUPBY` on
+purpose:
 
 | Prefix | Example | Meaning |
 |---|---|---|
