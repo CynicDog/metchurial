@@ -4,8 +4,8 @@ strings.txt, refs_*.tsv) from the domain models (metchurial/models) engine.py
 produces.
 
 summary.md is an index into the other artifacts, not a duplicate of them:
-every section beyond "Sensitive Findings" is a bounded count-plus-top-N view
-with a pointer to the full artifact file (strings.txt, bad_files.txt,
+every section except "Sensitive Findings" is a bounded count-plus-top-N view
+with a pointer to the full artifact file (strings.txt, bad_files.tsv,
 stopwords.txt, known_names.txt, refs_*.tsv), so its size stays
 fixed regardless of how large the scan is.
 """
@@ -16,6 +16,7 @@ import datetime
 import os
 from typing import Any, Callable, Iterable, Sequence, TextIO
 
+from metchurial.models.bad_file import BadFileReason
 from metchurial.models.findings import Finding
 from metchurial.models.identity import IdentityRow, SimilarityPair
 from metchurial.models.references import ColumnUse, FunctionCall, TableUse
@@ -181,22 +182,24 @@ def _write_string_occurrences(out: TextIO, name_candidates: list[str]) -> None:
     out.write("\n")
 
 
-def _write_bad_files(out: TextIO, previously_bad: dict[str, str],
-                     new_bad: dict[str, str]) -> None:
+def _write_bad_files(out: TextIO, previously_bad: dict[str, BadFileReason],
+                     new_bad: dict[str, BadFileReason]) -> None:
     out.write("## Bad Files\n\n")
     all_bad = dict(previously_bad)
     all_bad.update(new_bad)
     if not all_bad:
         out.write("No bad files skipped or flagged.\n\n")
         return
-    out.write("{} skipped (already in bad_files.txt), {} newly flagged this run. "
-              "Full list in bad_files.txt.\n\n".format(len(previously_bad), len(new_bad)))
-    out.write("| File | Reason | Newly flagged |\n|---|---|---|\n")
+    out.write("{} skipped (already in bad_files.tsv), {} newly flagged this run. "
+              "Full list in bad_files.tsv.\n\n".format(len(previously_bad), len(new_bad)))
+    out.write("| File | Category | Reason | Newly flagged |\n|---|---|---|---|\n")
     for fpath in sorted(all_bad)[:MAX_GROUPED_VALUES]:
-        out.write("| `{}` | {} | {} |\n".format(
-            md_escape(fpath), md_escape(all_bad[fpath]), "Y" if fpath in new_bad else "N"))
+        reason = all_bad[fpath]
+        out.write("| `{}` | {} | {} | {} |\n".format(
+            md_escape(fpath), md_escape(reason.category), md_escape(reason.message),
+            "Y" if fpath in new_bad else "N"))
     if len(all_bad) > MAX_GROUPED_VALUES:
-        out.write("\n_...+{} more, see bad_files.txt._\n".format(len(all_bad) - MAX_GROUPED_VALUES))
+        out.write("\n_...+{} more, see bad_files.tsv._\n".format(len(all_bad) - MAX_GROUPED_VALUES))
     out.write("\n")
 
 
@@ -325,7 +328,7 @@ def _write_select_blocks(out: TextIO, select_block_counts: dict[str, int]) -> No
 
 
 def write_markdown_report(path: str, run_info: dict[str, Any], tree: TreeScanResult, *,
-                          previously_bad: dict[str, str],
+                          previously_bad: dict[str, BadFileReason],
                           stopwords_count: int, stopwords_freshly_created: bool,
                           known_names_count: int, known_names_freshly_created: bool,
                           relations_summary: list[RelationRollup] | None = None,
@@ -335,15 +338,15 @@ def write_markdown_report(path: str, run_info: dict[str, Any], tree: TreeScanRes
     """Writes summary.md, a fixed-size index into every artifact a scan
     produces (not a duplicate of any of them). `tree` is the finished
     TreeScanResult; everything section-worthy is read straight off it.
-    Sections are written in order: run info, Sensitive Findings (with
-    per-file detail subsections), String Occurrences, Bad Files,
-    Stopwords, Known Names, then the opt-in sections -- Table & Column
-    References / Functions / Relations / Query Identity, gated by
-    `extract_metadata`; Select Blocks, gated by `split_selects`. A gated
-    section is omitted entirely rather than rendered empty when its flag
-    is off; a clean scan can still have JOIN relationships or bad files
-    worth reporting, so those sections are independent of whether any
-    finding was found. `query_similarity_rows` stays None when
+    Sections are written in order: run info, then the opt-in sections --
+    Query Identity / Relations / Functions / Table & Column References,
+    gated by `extract_metadata` -- String Occurrences, Bad Files,
+    Stopwords, Known Names, Select Blocks (gated by `split_selects`), and
+    finally Sensitive Findings (with per-file detail subsections) last. A
+    gated section is omitted entirely rather than rendered empty when its
+    flag is off; a clean scan can still have JOIN relationships or bad
+    files worth reporting, so those sections are independent of whether
+    any finding was found. `query_similarity_rows` stays None when
     --query-similarity is off, so the Query Identity section never points
     at a similarity file that wasn't written.
     `run_info`: {invocation, root, file_count, sensitive_columns,
@@ -351,18 +354,18 @@ def write_markdown_report(path: str, run_info: dict[str, Any], tree: TreeScanRes
     query_similarity, split_selects, mask_literals, verbose}."""
     with open(path, "w", encoding="utf-8-sig") as out:
         _write_run_info(out, run_info)
-        _write_sensitive_hits(out, tree.findings)
+        if extract_metadata:
+            _write_query_identity(out, tree.identity_rows, query_similarity_rows)
+            _write_relations(out, relations_summary or [])
+            _write_functions(out, tree.function_calls)
+            _write_references(out, tree.table_uses, tree.column_uses)
         _write_string_occurrences(out, tree.name_candidates)
         _write_bad_files(out, previously_bad, tree.bad_files)
         _write_stopwords(out, stopwords_count, stopwords_freshly_created)
         _write_known_names(out, known_names_count, known_names_freshly_created)
-        if extract_metadata:
-            _write_references(out, tree.table_uses, tree.column_uses)
-            _write_functions(out, tree.function_calls)
-            _write_relations(out, relations_summary or [])
-            _write_query_identity(out, tree.identity_rows, query_similarity_rows)
         if split_selects:
             _write_select_blocks(out, tree.select_block_counts)
+        _write_sensitive_hits(out, tree.findings)
 
 
 def write_strings_file(path: str, name_candidates: list[str]) -> None:

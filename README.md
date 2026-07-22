@@ -120,7 +120,7 @@ literals are sensitive or which unparseable files are safe to ignore.
 
 1. **Run it.** A first run over a fresh root produces `strings.txt` (every
    name-shaped literal not yet classified, with occurrence counts) and,
-   if anything couldn't be parsed, `bad_files.txt`.
+   if anything couldn't be parsed, `bad_files.tsv`.
 2. **Triage `strings.txt`.** Go through it and, for each candidate:
    - a real name you consider sensitive → copy it into `known_names.txt`;
      every literal matching it becomes a Known-Name-Matching finding from
@@ -131,18 +131,17 @@ literals are sensitive or which unparseable files are safe to ignore.
 
    A candidate left in neither file keeps reappearing in `strings.txt`
    every run until you classify it one way or the other.
-3. **Triage `bad_files.txt`.** For each file listed, open it and fix
+3. **Triage `bad_files.tsv`.** For each file listed, open it and fix
    whatever made it unparseable (or decide it's fine to leave out), then
-   either comment out that file's line in `bad_files.txt` (put a `#`
-   before the path) or delete the line outright — both mark it for
+   delete that file's data row (keep the header row) to mark it for
    another attempt (see [Bad files](#bad-files)).
 4. **Re-run.** Names now in `known_names.txt`/`stopwords.txt` change
    what's a finding and what still shows up in `strings.txt`; files no
-   longer (or now-commented) in `bad_files.txt` get parsed again and
-   either scan clean or land back in the list with a reason.
+   longer in `bad_files.tsv` get parsed again and either scan clean or
+   land back in the list with a reason.
 5. Repeat steps 2-4 until `strings.txt` has nothing left to classify and
-   `bad_files.txt` is empty, or contains only files you've deliberately
-   decided to leave out of scanning.
+   `bad_files.tsv` has no rows left, or only rows for files you've
+   deliberately decided to leave out of scanning.
 
 ## CLI reference
 
@@ -247,12 +246,12 @@ not a duplicate of it.
 
 | File | Written when | Contents |
 |---|---|---|
-| `summary.md` | always | Run info, Sensitive Findings (with per-file detail), String Occurrences, Bad Files, Stopwords, Known Names, and — if enabled — Table & Column References, Functions, Relations, Select Blocks |
+| `summary.md` | always | Run info; if `--extract-metadata` is on, Query Identity, Relations, Functions, Table & Column References; String Occurrences, Bad Files, Stopwords, Known Names; if `--split-selects` is on, Select Blocks; and finally Sensitive Findings (with per-file detail) |
 | `findings.tsv` | always | Every finding, one row per literal, for filtering/sorting in Excel |
 | `strings.txt` | always, full rewrite | Unique name-shaped literals — from live code and commented-out code alike — not yet classified into `known_names.txt`/`stopwords.txt`, most-frequent-first with occurrence counts, in a format directly copy-pasteable into either. Recomputed from scratch every run (not merged with past runs), so an unclassified literal just keeps reappearing until you triage it |
 | `stopwords.txt` | only if missing | Name-shaped literals reviewed and confirmed *not* sensitive — excluded from `strings.txt` from then on. Auto-created empty with a format-header if it doesn't exist yet; never rewritten by the tool otherwise, so it's safe to edit in place |
 | `known_names.txt` | only if missing | Name-shaped literals reviewed and confirmed sensitive — every matching literal becomes a known-name finding from then on. Auto-created empty with a format-header if it doesn't exist yet; never rewritten by the tool otherwise, so it's safe to edit in place |
-| `bad_files.txt` | always, merged with past runs | Persistent skip-list of files too malformed to parse — each run's newly-flagged files are added to whatever was already listed, so entries survive until you comment out or delete their line — see [Bad files](#bad-files) |
+| `bad_files.tsv` | always, merged with past runs | Persistent skip-list of files too malformed to parse — one row per file (path, category, item, reason), tab-separated. Each run's newly-flagged files are added to whatever was already listed, so entries survive until you delete their row — see [Bad files](#bad-files) |
 | `refs_tables.tsv` | `--extract-metadata` | Every `schema.table` reference found, with file/line |
 | `refs_columns.tsv` | `--extract-metadata` | Every `schema.table.column` reference found, with file/line |
 | `refs_functions.tsv` | `--extract-metadata` | Every function call and predicate operator found, with operands/file/line |
@@ -271,20 +270,39 @@ long time on a single file, or crash it outright.
 
 Two independent safety nets guard against this:
 
-- A cheap **pre-check** on the token stream (lexer-error ratio and
-  long runs of repeated punctuation) flags a file as bad before any real
-  parsing is attempted.
+- A cheap **pre-check** on the token stream flags a file as bad before any
+  real parsing is attempted, under one of two categories:
+  - `repeated-char-run` — a long run of identical single-character
+    punctuation tokens in a row (`========`, `<<<<<<<<`), possibly spaced
+    out (`- - - - -`). Tokens separated only by text a lexer error
+    swallowed (e.g. bare, unquoted Korean prose sitting directly in the
+    file body) are *not* treated as adjacent just because nothing sits
+    between them in the token list — otherwise ordinary Korean sentences
+    (each period landing right after the last, once the untokenizable
+    words between them vanish) would look exactly like a divider. A
+    single token that happens to be one long repeated character (a bare
+    `3333333333333333`, or the same thing quoted) is deliberately *not*
+    flagged either way — masked/dummy/round-number literals are
+    completely ordinary SQL data, and unlike `========` a single token is
+    cheap for the parser to fail on regardless of its content, so there's
+    no actual performance problem to defend against.
+  - `lexer-error-ratio` — too high a fraction of tokens are lexer errors
+    (bare non-ASCII section headers or prose mixed directly into the file
+    body rather than inside a comment). Deliberately tolerant of files
+    that just use bare Korean column aliases extensively, a real and
+    common pattern on its own.
 - A broad **try/except** around the actual scan of each file catches any
-  unexpected crash and treats it the same way.
+  unexpected crash (`crash`) or unreadable file (`unreadable`) and treats
+  it the same way.
 
-Either path records the file's path and a short reason in `bad_files.txt`,
-and the file is skipped entirely — not even attempted — on every later
-run, until its line is commented out (`#` before the path) or deleted —
-both parse as "no entry" and put the file back up for another attempt on
-the next scan. See [Workflow](#workflow) above for how this fits into the
-full triage loop.
+Every path records the file's path, category, the actual offending
+value/snippet, and a full reason in `bad_files.tsv`, and the file is
+skipped entirely — not even attempted — on every later run, until its data
+row is deleted, which puts the file back up for another attempt on the
+next scan. See [Workflow](#workflow) above for how this fits into the full
+triage loop.
 
-`bad_files.txt` is a local, per-environment artifact (it's `.gitignore`d)
+`bad_files.tsv` is a local, per-environment artifact (it's `.gitignore`d)
 rather than something meant to be committed and shared.
 
 ## Known limitations

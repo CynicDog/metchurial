@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Argparse CLI entry point: parses flags, drives scan_tree() over the
 given root, and writes every output artifact (summary.md, findings.tsv,
-strings.txt, stopwords.txt, known_names.txt, bad_files.txt, the
+strings.txt, stopwords.txt, known_names.txt, bad_files.tsv, the
 --extract-metadata refs_*.tsv files, the --split-selects
 split_manifest.tsv, and the --incremental incremental_cache.json) into
 the current working directory.
@@ -44,7 +44,7 @@ FINDINGS_PATH = "findings.tsv"
 STRINGS_PATH = "strings.txt"
 STOPWORDS_PATH = "stopwords.txt"
 KNOWN_NAMES_PATH = "known_names.txt"
-BAD_FILES_PATH = "bad_files.txt"
+BAD_FILES_PATH = "bad_files.tsv"
 REFS_TABLES_PATH = "refs_tables.tsv"
 REFS_COLUMNS_PATH = "refs_columns.tsv"
 FUNCTIONS_PATH = "refs_functions.tsv"
@@ -157,7 +157,7 @@ def main(argv: list[str] | None = None) -> None:
         sys.exit(2)
 
     # Files already marked bad on a previous run are skipped entirely this
-    # run (not even attempted) -- delete a line from bad_files.txt (after
+    # run (not even attempted) -- delete a row from bad_files.tsv (after
     # fixing that file) to have it re-scanned on the next run.
     previously_bad = load_bad_files(BAD_FILES_PATH)
 
@@ -202,7 +202,8 @@ def main(argv: list[str] | None = None) -> None:
         if not args.verbose:
             return
         if result.bad_reason is not None:
-            print("        antlr: skipped -- {}".format(result.bad_reason), file=sys.stderr)
+            print("        antlr: skipped -- [{}] {}".format(
+                result.bad_reason.category, result.bad_reason.message), file=sys.stderr)
         elif result.parse_stats is None:
             print("        antlr: reused from cache (--incremental)", file=sys.stderr)
         else:
@@ -243,7 +244,7 @@ def main(argv: list[str] | None = None) -> None:
 
     # Preserve skipped (still-unfixed) entries from previous runs, and add
     # anything newly flagged this run -- a file the user removed from
-    # bad_files.txt and that scanned clean this time simply doesn't appear
+    # bad_files.tsv and that scanned clean this time simply doesn't appear
     # in either set, so it naturally drops off the list.
     all_bad = dict(previously_bad)
     all_bad.update(tree.bad_files)
@@ -347,7 +348,7 @@ def main(argv: list[str] | None = None) -> None:
         print("Masked files   : {} file(s) rewritten in place".format(
             len(masked_written)))
     if previously_bad or tree.bad_files:
-        print("Bad files      : {} skipped (already in bad_files.txt), {} newly flagged "
+        print("Bad files      : {} skipped (already in bad_files.tsv), {} newly flagged "
              "this run -- see {}".format(
                  len(previously_bad), len(tree.bad_files), os.path.abspath(BAD_FILES_PATH)))
     if args.incremental:

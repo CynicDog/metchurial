@@ -6,3 +6,5 @@ __pycache__/
 .ruff_cache/
 gen/
 pypi-dist/
+scripts/
+bad_files.tsv

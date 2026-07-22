@@ -35,6 +35,7 @@ from metchurial.detect.comment_rescan import comment_tokens, rescan_comments
 from metchurial.detect.extractor_visitor import ExtractorVisitor
 from metchurial.detect.supplementary_checks import make_token_scan_fallback
 from metchurial.io_utils import read_text
+from metchurial.models.bad_file import BadFileReason
 from metchurial.models.findings import Finding
 from metchurial.models.options import DEFAULT_SENSITIVE_COLUMNS, ScanOptions
 from metchurial.models.parse_stats import ParseStats
@@ -119,13 +120,13 @@ def scan_file(path: str, options: ScanOptions | None = None) -> FileScanResult:
     resync-loop cap (statement_driver.py). `options.split_selects` also
     writes -NN split files alongside `path` as a side effect.
 
-    `bad_reason` is None on a normal scan; otherwise a short
-    human-readable string, with every other field empty/zero. Set for an
+    `bad_reason` is None on a normal scan; otherwise a BadFileReason
+    (models/bad_file.py), with every other field empty/zero. Set for an
     unreadable file (OSError), a cheap up-front quality check
     (bad_file_check.py) that skipped the expensive parse entirely, or an
     unexpected exception caught here so one bad file can't take down a
     whole tree scan. Not printed per-file to stderr -- recorded in
-    bad_files.txt, with cli.py printing one aggregate count at the end.
+    bad_files.tsv, with cli.py printing one aggregate count at the end.
 
     `parse_stats` (models/parse_stats.py) is set on the returned result
     for a normal scan, None for a bad file -- there's no ANTLR work to
@@ -137,7 +138,9 @@ def scan_file(path: str, options: ScanOptions | None = None) -> FileScanResult:
     try:
         text, enc = read_text(path)
     except OSError as e:
-        return FileScanResult(bad_reason="cannot read: {}: {}".format(type(e).__name__, e))
+        return FileScanResult(bad_reason=BadFileReason(
+            category="unreadable", item=type(e).__name__,
+            message="cannot read: {}: {}".format(type(e).__name__, e)))
 
     # Cheap lex-only quality gate: catches the common case (heavy non-SQL
     # noise) before spending any time in the expensive tiered driver. The
@@ -151,8 +154,9 @@ def scan_file(path: str, options: ScanOptions | None = None) -> FileScanResult:
     try:
         result = _scan_file_body(path, text, enc, options, lexed)
     except Exception as e:
-        return FileScanResult(
-            bad_reason="crashed while scanning: {}: {}".format(type(e).__name__, e))
+        return FileScanResult(bad_reason=BadFileReason(
+            category="crash", item=type(e).__name__,
+            message="crashed while scanning: {}: {}".format(type(e).__name__, e)))
     if result.parse_stats is not None:
         result.parse_stats.elapsed_seconds = time.perf_counter() - t0
     return result

@@ -52,7 +52,7 @@ class TestBundleIsSelfContained(unittest.TestCase):
             clean_python = clean_venv / "bin" / "python"
 
             # Output filenames are fixed (summary.md/findings.tsv/strings.txt/
-            # stopwords.txt/bad_files.txt) rather than flag-configurable, so
+            # stopwords.txt/bad_files.tsv) rather than flag-configurable, so
             # the bundle-mode and package-mode runs are kept from colliding
             # by giving each its own cwd instead of its own output paths.
             bundle_out = tmp / "bundle_out"

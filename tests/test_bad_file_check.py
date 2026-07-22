@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """Unit tests for bad_file_check.py's cheap, lex-only "is this real SQL"
-heuristic -- the first line of defense in cli.py's bad_files.txt
+heuristic -- the first line of defense in cli.py's bad_files.tsv
 workflow (scan_file's own try/except around the real work is the second,
 for whatever this cheap check doesn't catch).
 
@@ -18,9 +18,19 @@ from metchurial.detect.bad_file_check import check_file_quality  # noqa: E402
 from metchurial.parsing.statement_driver import lex_file  # noqa: E402
 
 
-def _check(sql):
+def _check_reason(sql):
+    """The full BadFileReason (or None) -- for tests asserting on the
+    structured category/item fields, not just the prose message."""
     all_tokens, lexer_errors = lex_file(sql)
     return check_file_quality(all_tokens, lexer_errors)
+
+
+def _check(sql):
+    """Just the human-readable message, or None -- BadFileReason.__str__
+    returns it too, but spelling it out keeps assertIn/assertIsNone calls
+    below working against a plain str/None like before."""
+    reason = _check_reason(sql)
+    return reason.message if reason is not None else None
 
 
 class TestDividerDetection(unittest.TestCase):
@@ -71,6 +81,54 @@ class TestPunctuationRunIgnoresSwallowedText(unittest.TestCase):
         reason = _check(sql)
         self.assertIsNotNone(reason)
         self.assertIn("divider", reason)
+
+
+class TestSingleTokenValuesAreNotFlagged(unittest.TestCase):
+    """A single token that happens to be one long repeated character (a
+    bare 3333333333333333, or the same thing quoted) must never be
+    treated as a divider: it's exactly one resync point for the tiered
+    driver regardless of its content (unlike '========', which is many
+    separate single-char tokens -- the actual performance problem this
+    precheck exists to defend against), and a masked/dummy/round-number
+    numeric literal is completely ordinary, legitimate SQL data, quoted
+    or bare."""
+
+    def test_bare_repeated_digit_literal_in_a_real_predicate_is_not_flagged(self):
+        sql = "SELECT * FROM T WHERE ACCT_NO = 3333333333333333"
+        self.assertIsNone(_check(sql))
+
+    def test_bare_repeated_digit_literal_in_values_list_is_not_flagged(self):
+        sql = "INSERT INTO T (ACCT_NO) VALUES (3333333333333333)"
+        self.assertIsNone(_check(sql))
+
+    def test_quoted_repeated_digit_literal_is_not_flagged(self):
+        sql = "SELECT * FROM T WHERE COL = '3333333333333333'"
+        self.assertIsNone(_check(sql))
+
+    def test_round_number_amount_is_not_flagged(self):
+        sql = "SELECT * FROM T WHERE AMOUNT > 1000000000"
+        self.assertIsNone(_check(sql))
+
+
+class TestBadFileReasonStructuredFields(unittest.TestCase):
+    """bad_files.tsv (io_utils.py) needs category/item, not just prose --
+    lock in that check_file_quality actually populates them."""
+
+    def test_repeated_char_run_reports_category_and_matched_item(self):
+        sql = "========================================\nSELECT * FROM t1;\n"
+        reason = _check_reason(sql)
+        self.assertIsNotNone(reason)
+        self.assertEqual(reason.category, "repeated-char-run")
+        self.assertTrue(reason.item.startswith("===="))
+
+    def test_lexer_error_ratio_reports_category_and_offending_text(self):
+        sql = "이것은실제SQL이아닌설명입니다전혀다른내용입니다\nSELECT 1 FROM T1;"
+        reason = _check_reason(sql)
+        self.assertIsNotNone(reason)
+        self.assertEqual(reason.category, "lexer-error-ratio")
+        # item should be built from the actual characters the lexer
+        # choked on, not left empty.
+        self.assertTrue(reason.item)
 
 
 class TestLexerErrorRatio(unittest.TestCase):

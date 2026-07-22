@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from metchurial.models.bad_file import BadFileReason
 from metchurial.models.findings import Finding
 from metchurial.models.identity import IdentityRow
 from metchurial.models.parse_stats import ParseStats
@@ -31,7 +32,7 @@ class FileScanResult:
     split_manifest: list[SplitManifestRow] = field(default_factory=list)
     function_calls: list[FunctionCall] = field(default_factory=list)
     identity_rows: list[IdentityRow] = field(default_factory=list)
-    bad_reason: str | None = None
+    bad_reason: BadFileReason | None = None
     parse_stats: ParseStats | None = None
 
 
@@ -51,6 +52,6 @@ class TreeScanResult:
     select_block_counts: dict[str, int] = field(default_factory=dict)
     split_manifest: list[SplitManifestRow] = field(default_factory=list)
     function_calls: list[FunctionCall] = field(default_factory=list)
-    bad_files: dict[str, str] = field(default_factory=dict)
+    bad_files: dict[str, BadFileReason] = field(default_factory=dict)
     identity_rows: list[IdentityRow] = field(default_factory=list)
     file_count: int = 0

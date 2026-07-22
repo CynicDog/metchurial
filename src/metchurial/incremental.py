@@ -33,6 +33,7 @@ from __future__ import annotations
 import json
 import os
 
+from metchurial.models.bad_file import BadFileReason
 from metchurial.models.findings import Finding
 from metchurial.models.identity import IdentityRow
 from metchurial.models.options import ScanOptions
@@ -129,7 +130,7 @@ def _serialize_result(result: FileScanResult) -> dict:
         "split_manifest": [vars(s) for s in result.split_manifest],
         "function_calls": [vars(fn) for fn in result.function_calls],
         "identity_rows": [_serialize_identity_row(r) for r in result.identity_rows],
-        "bad_reason": result.bad_reason,
+        "bad_reason": vars(result.bad_reason) if result.bad_reason is not None else None,
     }
 
 
@@ -162,5 +163,5 @@ def _deserialize_result(d: dict) -> FileScanResult:
         split_manifest=[SplitManifestRow(**s) for s in d["split_manifest"]],
         function_calls=[FunctionCall(**fn) for fn in d["function_calls"]],
         identity_rows=[_deserialize_identity_row(r) for r in d["identity_rows"]],
-        bad_reason=d["bad_reason"],
+        bad_reason=BadFileReason(**d["bad_reason"]) if d.get("bad_reason") is not None else None,
     )

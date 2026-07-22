@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """File I/O helpers: multi-encoding text reading plus the load/write pairs
-for every line-delimited artifact metchurial maintains across runs
-(bad_files.txt, stopwords.txt, known_names.txt).
+for every persistent artifact metchurial maintains across runs
+(bad_files.tsv, stopwords.txt, known_names.txt).
 """
 
 from __future__ import annotations
@@ -10,8 +10,14 @@ import os
 import sys
 from typing import Callable
 
+from metchurial.models.bad_file import BadFileReason
+from metchurial.tsv import _clean
+
 # Encodings to try when reading files (common on Windows / Korean environments).
 ENCODINGS = ["utf-8-sig", "utf-8", "cp949", "euc-kr", "latin-1"]
+
+# bad_files.tsv column order -- keep in sync with load_bad_files/write_bad_files.
+_BAD_FILES_HEADER = ["path", "category", "item", "message"]
 
 
 def read_text(path: str) -> tuple[str, str]:
@@ -43,49 +49,59 @@ def _for_each_line(path: str, handle_line: Callable[[str], None]) -> None:
             continue
 
 
-def load_bad_files(path: str) -> dict[str, str]:
-    """Load a persistent bad_files.txt (see cli.py's skip-list workflow):
-    one file path per line, with an optional trailing '# reason' comment
-    (same convention as stopwords.txt below). Returns {abspath: reason}
-    for every entry -- reason is "" if none was recorded. A missing file
-    is the normal first-run state, so this returns an empty dict silently
+def load_bad_files(path: str) -> dict[str, BadFileReason]:
+    """Load a persistent bad_files.tsv (see cli.py's skip-list workflow):
+    one file per row -- path, category, item, message, tab-separated,
+    fixed header row first (same conventions as tsv.write_refs_tsv).
+    Returns {abspath: BadFileReason} for every entry. A missing file is
+    the normal first-run state, so this returns an empty dict silently
     rather than warning (unlike load_stopwords/load_known_names below,
     where a missing file is unexpected)."""
-    entries = {}
+    entries: dict[str, BadFileReason] = {}
     if not path or not os.path.isfile(path):
         return entries
 
+    seen_header = False
+
     def add_entry(line: str) -> None:
-        if "#" in line:
-            p, reason = line.split("#", 1)
-            p, reason = p.strip(), reason.strip()
-        else:
-            p, reason = line.strip(), ""
-        if p:
-            entries[os.path.abspath(p)] = reason
+        nonlocal seen_header
+        line = line.rstrip("\r\n")
+        if not line:
+            return
+        if not seen_header:
+            seen_header = True
+            return
+        parts = line.split("\t")
+        p = parts[0].strip()
+        if not p:
+            return
+        category = parts[1] if len(parts) > 1 else ""
+        item = parts[2] if len(parts) > 2 else ""
+        message = parts[3] if len(parts) > 3 else ""
+        entries[os.path.abspath(p)] = BadFileReason(category=category, item=item, message=message)
 
     _for_each_line(path, add_entry)
     return entries
 
 
-def write_bad_files(path: str, entries: dict[str, str]) -> None:
-    """Writes bad_files.txt: one path per line, its reason as a trailing
-    '#' comment, sorted for stable diffs across runs. `entries`:
-    {path: reason}. Deleting a line lets that file be re-scanned on the
-    next run instead of skipped."""
-    with open(path, "w", encoding="utf-8") as f:
-        f.write("# metchurial bad-files list -- one file per line, reason as a "
-               "trailing '#' comment.\n")
-        f.write("# A file listed here is skipped entirely on the next run. Delete "
-               "its line (after fixing the file) to have it re-scanned.\n")
+def write_bad_files(path: str, entries: dict[str, BadFileReason]) -> None:
+    """Writes bad_files.tsv: one row per file -- path, category, item,
+    message, tab-separated, sorted by path for stable diffs across runs,
+    same conventions as tsv.write_refs_tsv (utf-8-sig, header row always
+    written, embedded tabs/newlines stripped from every cell). `entries`:
+    {path: BadFileReason}. Deleting a data row (keeping the header) lets
+    that file be re-scanned on the next run instead of skipped."""
+    with open(path, "w", encoding="utf-8-sig", newline="") as f:
+        f.write("\t".join(_BAD_FILES_HEADER) + "\n")
         for p in sorted(entries):
             reason = entries[p]
-            f.write("{}  # {}\n".format(p, reason) if reason else "{}\n".format(p))
+            f.write("\t".join(_clean(v) for v in
+                              (p, reason.category, reason.item, reason.message)) + "\n")
 
 
 def ensure_stopwords_template(path: str) -> None:
     """Write an empty stopwords.txt with a format-explaining header if one
-    doesn't exist yet -- same self-maintaining convention as bad_files.txt
+    doesn't exist yet -- same self-maintaining convention as bad_files.tsv
     (write_bad_files above), so a fresh checkout gets a stopwords.txt to
     edit in place instead of needing one hand-created first."""
     if os.path.isfile(path):

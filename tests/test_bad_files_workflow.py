@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Tests for the bad_files.txt skip-list workflow: io_utils.py's
+"""Tests for the bad_files.tsv skip-list workflow: io_utils.py's
 load_bad_files/write_bad_files round-trip, and scan_file's own two
 safety nets (the cheap bad_file_check pre-check, and the try/except
 around the real work so one file's unexpected crash can't take down an
@@ -20,38 +20,49 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 
 from metchurial import engine as scanner  # noqa: E402
 from metchurial.io_utils import load_bad_files, write_bad_files  # noqa: E402
+from metchurial.models.bad_file import BadFileReason  # noqa: E402
 
 
 class TestBadFilesIO(unittest.TestCase):
     def setUp(self):
         self.d = tempfile.mkdtemp()
-        self.path = os.path.join(self.d, "bad_files.txt")
+        self.path = os.path.join(self.d, "bad_files.tsv")
 
     def tearDown(self):
         shutil.rmtree(self.d)
 
     def test_round_trip(self):
-        entries = {"/a/b.sql": "some reason", "/c/d.sql": ""}
+        entries = {
+            "/a/b.sql": BadFileReason(category="repeated-char-run", item="====",
+                                      message="some reason"),
+            "/c/d.sql": BadFileReason(category="", item="", message=""),
+        }
         write_bad_files(self.path, entries)
         loaded = load_bad_files(self.path)
-        self.assertEqual(loaded, {os.path.abspath("/a/b.sql"): "some reason",
-                                  os.path.abspath("/c/d.sql"): ""})
+        self.assertEqual(loaded, {
+            os.path.abspath("/a/b.sql"): BadFileReason(
+                category="repeated-char-run", item="====", message="some reason"),
+            os.path.abspath("/c/d.sql"): BadFileReason(category="", item="", message=""),
+        })
 
     def test_missing_file_returns_empty(self):
-        self.assertEqual(load_bad_files(os.path.join(self.d, "nope.txt")), {})
+        self.assertEqual(load_bad_files(os.path.join(self.d, "nope.tsv")), {})
 
-    def test_comment_only_lines_are_not_entries(self):
-        with open(self.path, "w", encoding="utf-8") as f:
-            f.write("# just a comment, no path here\n")
+    def test_header_only_file_has_no_entries(self):
+        write_bad_files(self.path, {})
         self.assertEqual(load_bad_files(self.path), {})
 
-    def test_deleting_a_line_removes_it_on_reload(self):
-        write_bad_files(self.path, {"/a/b.sql": "reason1", "/c/d.sql": "reason2"})
-        with open(self.path, encoding="utf-8") as f:
+    def test_deleting_a_row_removes_it_on_reload(self):
+        write_bad_files(self.path, {
+            "/a/b.sql": BadFileReason(category="crash", item="", message="reason1"),
+            "/c/d.sql": BadFileReason(category="crash", item="", message="reason2"),
+        })
+        with open(self.path, encoding="utf-8-sig") as f:
             lines = f.readlines()
-        # simulate the user deleting the line for /a/b.sql
+        # simulate the user deleting the data row for /a/b.sql, keeping
+        # the header row
         kept = [ln for ln in lines if "/a/b.sql" not in ln]
-        with open(self.path, "w", encoding="utf-8") as f:
+        with open(self.path, "w", encoding="utf-8-sig") as f:
             f.writelines(kept)
         loaded = load_bad_files(self.path)
         self.assertNotIn(os.path.abspath("/a/b.sql"), loaded)
@@ -79,8 +90,9 @@ class TestScanFileSafetyNets(unittest.TestCase):
             with mock.patch("metchurial.engine._scan_file_body", side_effect=RuntimeError("boom")):
                 result = scanner.scan_file(path)
             self.assertIsNotNone(result.bad_reason)
-            self.assertIn("RuntimeError", result.bad_reason)
-            self.assertIn("boom", result.bad_reason)
+            self.assertEqual(result.bad_reason.category, "crash")
+            self.assertIn("RuntimeError", result.bad_reason.message)
+            self.assertIn("boom", result.bad_reason.message)
             self.assertEqual((result.findings, result.name_candidates, result.select_block_count),
                              ([], [], 0))
         finally:
