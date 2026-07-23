@@ -31,9 +31,21 @@ zero third-party packages installed (not even `antlr4-python3-runtime`)
 and diffing the output against a normal run — see `tests/test_bundle.py`.
 
 ```bat
-python metchurial.py C:\sql\root
-python metchurial.py C:\sql\root --sensitive-columns ACCT_ID CTRT_NO HLDR_NM
-python metchurial.py C:\sql\root --extract-metadata --split-selects
+python metchurial.py C:\sql\root --help 
+python metchurial.py C:\sql\root --sensitive-columns ACCT_ID CTRT_NO HLDR_NM --extract-metadata
+
+python metchurial.py C:\sql\root `
+    --sensitive-columns ACCT_ID CTRT_NO HLDR_NM `
+    --max-chunk-iterations 5000000 `
+    --workers 8 `
+    --extract-metadata `
+    --verbose
+
+python metchurial.py C:\sql\root `
+    --workers 8 `
+    --split-selects `
+    --verbose
+
 python metchurial.py C:\sql\root --mask-literals
 python metchurial.py C:\sql\root --workers 8 --verbose
 ```
