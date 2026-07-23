@@ -28,6 +28,16 @@ DEFAULT_EXTENSIONS = ("sql", "txt")
 DEFAULT_MAX_CHUNK_ITERATIONS = 200000
 
 
+def extension_suffixes(extensions: tuple[str, ...]) -> tuple[str, ...]:
+    """Normalizes `extensions` (as passed to --extensions/ScanOptions) into
+    lowercase, dot-prefixed suffixes for `name.lower().endswith(...)`
+    matching -- the one definition of "does this filename match
+    --extensions", shared by engine.py's scan filter and quarantine.py's
+    non-matching filter so the two can never silently diverge on what
+    counts as a match."""
+    return tuple("." + ext.lower().lstrip(".") for ext in extensions)
+
+
 @dataclass(frozen=True)
 class ScanOptions:
     """What to detect and extract, and how hard to try.

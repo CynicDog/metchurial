@@ -4,6 +4,13 @@ under the scan root whose extension isn't in --extensions out into a
 separate quarantine directory -- so after a run, everything left under
 root matches one of --extensions, and every file that didn't is sitting
 in quarantine_dir instead, still grouped by the folder it came from.
+
+Complementary to bad_files.tsv (models/bad_file.py), not a variant of it:
+a quarantined file never even gets opened, since --extensions rules it
+out before the scan starts -- bad_files.tsv is strictly for files that
+*did* match --extensions and were actually read/lexed/parsed but failed
+partway through. Nothing that ends up in quarantine_dir can ever appear
+in bad_files.tsv, and vice versa.
 """
 
 from __future__ import annotations
@@ -11,6 +18,7 @@ from __future__ import annotations
 import os
 import shutil
 
+from metchurial.models.options import extension_suffixes
 from metchurial.models.quarantine import QuarantineRow
 
 
@@ -51,7 +59,7 @@ def quarantine_non_matching(root: str, extensions: tuple[str, ...], quarantine_d
     Returns one QuarantineRow per file actually moved, in os.walk order."""
     exclude_paths = exclude_paths or set()
     abs_quarantine = os.path.abspath(quarantine_dir)
-    suffixes = tuple("." + ext.lower().lstrip(".") for ext in extensions)
+    suffixes = extension_suffixes(extensions)
     moved: list[QuarantineRow] = []
 
     for dirpath, dirnames, filenames in os.walk(root):

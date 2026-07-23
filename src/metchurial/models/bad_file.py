@@ -4,6 +4,15 @@ bad_file_check.py's cheap pre-check and engine.py's own two other safety
 nets (an unreadable file, an unexpected crash mid-scan), so bad_files.tsv
 (io_utils.py) always has the same three columns to report regardless of
 which of the three actually skipped the file.
+
+Every file that reaches scan_file() already matched --extensions --
+engine.py's _matching_files filters the tree by extension before any file
+is ever opened, so a BadFileReason is never about extension, only about
+what happened once the scan actually tried to read/lex/parse the file.
+Contrast with --quarantine (quarantine.py): a quarantined file's
+extension never matched --extensions in the first place, so it's moved
+out and never reaches this code at all -- bad_files.tsv is strictly the
+files that *did* match and got a real attempt but failed partway through.
 """
 
 from __future__ import annotations

@@ -147,7 +147,11 @@ def main(argv: list[str] | None = None) -> None:
                         "records one row per file moved (original path -> quarantine "
                         "path). The scan itself only ever looked at --extensions files "
                         "anyway, so this doesn't change what gets scanned -- it just "
-                        "clears everything else out of the tree first (default: off)")
+                        "clears everything else out of the tree first. Distinct from "
+                        "bad_files.tsv: a quarantined file is never even opened, since its "
+                        "extension ruled it out up front -- bad_files.tsv is for files "
+                        "that matched --extensions and got a real attempt but failed "
+                        "(default: off)")
     ap.add_argument("--incremental", action="store_true",
                     help="Skip re-scanning a file whose size+mtime and requested "
                         "--extract-metadata/--split-selects flags both match its "

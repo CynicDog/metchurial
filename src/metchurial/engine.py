@@ -37,7 +37,7 @@ from metchurial.detect.supplementary_checks import make_token_scan_fallback
 from metchurial.io_utils import read_text
 from metchurial.models.bad_file import BadFileReason
 from metchurial.models.findings import Finding
-from metchurial.models.options import DEFAULT_SENSITIVE_COLUMNS, ScanOptions
+from metchurial.models.options import DEFAULT_SENSITIVE_COLUMNS, ScanOptions, extension_suffixes
 from metchurial.models.parse_stats import ParseStats
 from metchurial.models.references import ColumnUse, FunctionCall, TableUse
 from metchurial.models.relations import RelationEdge
@@ -352,9 +352,7 @@ def _scan_file_body(path: str, text: str, enc: str, options: ScanOptions,
         result.select_block_count = len(blocks)
         written = select_blocks.write_split_files(path, text, all_tokens, blocks)
         if written:
-            known_extensions = (frozenset(e.lower().lstrip(".") for e in options.extensions)
-                                | _BACKUP_LIKE_EXTENSIONS)
-            _delete_backup_siblings(path, known_extensions)
+            _delete_backup_siblings(path, _known_extensions(options.extensions))
         total = len(written)
         result.split_manifest = [
             SplitManifestRow(original_file=path, split_file=split_path,
@@ -374,6 +372,15 @@ def _scan_file_body(path: str, text: str, enc: str, options: ScanOptions,
 _BACKUP_LIKE_EXTENSIONS = frozenset({
     "bak", "backup", "bkup", "bk", "old", "orig", "save", "swp", "tmp",
 })
+
+
+def _known_extensions(extensions: tuple[str, ...]) -> frozenset[str]:
+    """`extensions` (as configured) plus _BACKUP_LIKE_EXTENSIONS, both
+    lower-cased and de-dotted -- the bare-extension-token vocabulary
+    _file_identity strips against. Kept separate from
+    models.options.extension_suffixes, which normalizes for
+    endswith()-style suffix matching instead of single-token comparison."""
+    return frozenset(e.lower().lstrip(".") for e in extensions) | _BACKUP_LIKE_EXTENSIONS
 
 
 def _file_identity(name: str, known_extensions: frozenset[str]) -> str:
@@ -465,8 +472,7 @@ def _is_stale_split_output(name: str, sibling_names: set[str]) -> bool:
 
 def _matching_files(root: str, suffixes: tuple[str, ...], extensions: tuple[str, ...],
                     exclude_paths: set[str]) -> Iterator[str]:
-    known_extensions = (frozenset(e.lower().lstrip(".") for e in extensions)
-                        | _BACKUP_LIKE_EXTENSIONS)
+    known_extensions = _known_extensions(extensions)
     for dirpath, _dirnames, filenames in os.walk(root):
         name_set = set(filenames)
         candidates = [name for name in filenames if name.lower().endswith(suffixes)
@@ -548,7 +554,7 @@ def scan_tree(root: str, options: ScanOptions | None = None, *,
     (see cli.py) needs every row gathered back here first, so it
     deliberately isn't run per-worker."""
     options = options if options is not None else ScanOptions()
-    suffixes = tuple("." + ext.lower().lstrip(".") for ext in options.extensions)
+    suffixes = extension_suffixes(options.extensions)
     exclude_paths = exclude_paths or set()
     cached_results = cached_results or {}
     tree = TreeScanResult()

@@ -20,7 +20,7 @@ that same parse tree, as specific analyses layered on top of it.
 | **Sensitive-value detection** — sensitive-column comparisons and known-name literals | *(default, always on)* | [What it detects](#what-it-detects) |
 | **File splitting** — one file per standalone SELECT block | `--split-selects` | [Output artifacts](#output-artifacts) |
 | **Literal masking** — rewrite flagged literals to fixed placeholders in place | `--mask-literals` | [Output artifacts](#output-artifacts) |
-| **Quarantine** — move every non-matching-extension file out of the scan root before scanning | `--quarantine` | [Output artifacts](#output-artifacts) |
+| **Quarantine** — move every non-matching-extension file out of the scan root before scanning (never opened, let alone parsed — contrast with [Bad files](#bad-files)) | `--quarantine` | [Output artifacts](#output-artifacts) |
 
 ## Quick start
 
@@ -132,6 +132,13 @@ metchurial is built to be run repeatedly, with a human triaging its output
 between runs — it deliberately doesn't try to auto-decide which name-shaped
 literals are sensitive or which unparseable files are safe to ignore.
 
+0. **(Optional) `--quarantine` a messy root first.** If `root` is full of
+   non-SQL files (`.docx`, `.md`, spreadsheets, ...), running with
+   `--quarantine` once moves all of them out to `./quarantine` before the
+   scan starts. This doesn't change what gets scanned — the scan only
+   ever looked at `--extensions` files anyway — it just leaves a cleaner
+   tree and a `quarantine_manifest.tsv` to review. Skip this if `root`
+   already only contains files you want scanned.
 1. **Run it.** A first run over a fresh root produces `strings.txt` (every
    name-shaped literal not yet classified, with occurrence counts) and,
    if anything couldn't be parsed, `bad_files.tsv`.
@@ -171,7 +178,7 @@ literals are sensitive or which unparseable files are safe to ignore.
 | `--workers N` | `1` | Scan across N worker processes instead of one |
 | `--max-chunk-iterations N` | `200000` | Safety-valve cap on the resync driver's loop iterations per statement chunk |
 | `--incremental` | off | Skip re-scanning a file whose size+mtime and extract-metadata/split-selects flags both match its entry in `incremental_cache.json` from a previous run; its cached results are merged into this run's reports as if freshly scanned, so `refs_*.tsv`/`summary.md`/`split_manifest.tsv` stay complete across incremental runs on a large tree |
-| `--quarantine` | off | Before scanning, recursively move every file under `root` whose extension isn't in `--extensions` into `./quarantine` (created as needed), mirroring each file's path relative to `root` so the folder it came from stays visible (`sub/notes.docx` → `quarantine/sub/notes.docx`); `quarantine_manifest.tsv` records one row per file moved. Doesn't change what gets scanned — the scan only ever looked at `--extensions` files anyway — it just clears everything else out of the tree |
+| `--quarantine` | off | Before scanning, recursively move every file under `root` whose extension isn't in `--extensions` into `./quarantine` (created as needed), mirroring each file's path relative to `root` so the folder it came from stays visible (`sub/notes.docx` → `quarantine/sub/notes.docx`); `quarantine_manifest.tsv` records one row per file moved. Doesn't change what gets scanned — the scan only ever looked at `--extensions` files anyway — it just clears everything else out of the tree. A quarantined file is never opened at all; contrast with [Bad files](#bad-files), which *did* match `--extensions` and got a real attempt |
 | `--verbose` | off | Also print a one-line ANTLR processing summary (chunk count, tiered-loop iteration breakdown, elapsed time) to stderr after each file's `[i/N]` progress line, which itself is always printed regardless of this flag |
 
 `--workers N` scans files across N worker processes (`concurrent.futures.
@@ -266,7 +273,7 @@ not a duplicate of it.
 | `strings.txt` | always, full rewrite | Unique name-shaped literals — from live code and commented-out code alike — not yet classified into `known_names.txt`/`stopwords.txt`, most-frequent-first with occurrence counts, in a format directly copy-pasteable into either. Recomputed from scratch every run (not merged with past runs), so an unclassified literal just keeps reappearing until you triage it |
 | `stopwords.txt` | only if missing | Name-shaped literals reviewed and confirmed *not* sensitive — excluded from `strings.txt` from then on. Auto-created empty with a format-header if it doesn't exist yet; never rewritten by the tool otherwise, so it's safe to edit in place |
 | `known_names.txt` | only if missing | Name-shaped literals reviewed and confirmed sensitive — every matching literal becomes a known-name finding from then on. Auto-created empty with a format-header if it doesn't exist yet; never rewritten by the tool otherwise, so it's safe to edit in place |
-| `bad_files.tsv` | always, merged with past runs | Persistent skip-list of files too malformed to parse — one row per file (path, category, item, reason), tab-separated. Each run's newly-flagged files are added to whatever was already listed, so entries survive until you delete their row — see [Bad files](#bad-files) |
+| `bad_files.tsv` | always, merged with past runs | Persistent skip-list of files that matched `--extensions` and were actually attempted, but too malformed to parse — one row per file (path, category, item, reason), tab-separated. Each run's newly-flagged files are added to whatever was already listed, so entries survive until you delete their row — see [Bad files](#bad-files). Not to be confused with `quarantine_manifest.tsv` below, whose files were never attempted at all |
 | `refs_tables.tsv` | `--extract-metadata` | Every `schema.table` reference found, with file/line |
 | `refs_columns.tsv` | `--extract-metadata` | Every `schema.table.column` reference found, with file/line |
 | `refs_functions.tsv` | `--extract-metadata` | Every function call and predicate operator found, with operands/file/line |
@@ -277,6 +284,18 @@ not a duplicate of it.
 | `quarantine_manifest.tsv` | `--quarantine` | One row per file moved out of the scan root: `original_file`, `quarantined_file` |
 
 ## Bad files
+
+**Bad files are strictly a subset of `--extensions`-matching files** —
+every file scan_file() ever looks at has already passed the
+`--extensions` filter, so "bad" is never about extension, only about what
+happened once the scan actually opened, lexed, and tried to parse the
+file. This is the opposite case from [`--quarantine`](#capabilities): a
+quarantined file's extension never matched `--extensions` in the first
+place, so it's moved aside and never opened at all, let alone parsed — it
+can never show up in `bad_files.tsv`, and a bad file can never show up in
+`quarantine_manifest.tsv`. If you're scanning a messy root full of
+non-SQL files, `--quarantine` clears those out up front; `bad_files.tsv`
+is for the `.sql`/`.txt` files left behind that still didn't parse.
 
 Some real-world SQL files aren't really valid SQL — internal section
 dividers (`========`, `<<목표KPI>>`), bare prose headers, Korean-language
