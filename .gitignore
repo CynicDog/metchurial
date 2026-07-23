@@ -8,3 +8,4 @@ gen/
 pypi-dist/
 scripts/
 bad_files.tsv
+_quarantine/

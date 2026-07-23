@@ -3,10 +3,16 @@
 given root, and writes every output artifact (summary.md, findings.tsv,
 strings.txt, stopwords.txt, known_names.txt, bad_files.tsv, the
 --extract-metadata refs_*.tsv files, the --split-selects
-split_manifest.tsv, the --incremental incremental_cache.json, and the
---quarantine quarantine_manifest.tsv) into the current working directory.
---un-split-selects instead consumes split_manifest.tsv to revert a
-previous --split-selects run, before the scan itself runs.
+split_manifest.tsv, and quarantine_manifest.tsv) into the current working
+directory. --un-split-selects instead consumes split_manifest.tsv to
+revert a previous --split-selects run, before the scan itself runs.
+
+Every run also, automatically and unconditionally (not behind any flag):
+moves every file under root whose extension isn't in --extensions into
+_quarantine/excluded/ before the scan starts, and moves every file the
+scan itself flags bad into _quarantine/bad_files/ once it's done -- see
+metchurial.quarantine's own module docstring for why both are
+unconditional rather than opt-in.
 """
 
 from __future__ import annotations
@@ -23,9 +29,8 @@ from metchurial.io_utils import (ensure_known_names_template, ensure_stopwords_t
 from metchurial.report import write_markdown_report, write_tsv_report, write_strings_file
 from metchurial.tsv import write_refs_tsv
 from metchurial.engine import scan_tree
-from metchurial import incremental as incremental_module
 from metchurial import quarantine as quarantine_module
-from metchurial import unsplit as unsplit_module
+from metchurial.split import unsplit as unsplit_module
 from metchurial.models.options import (DEFAULT_EXTENSIONS, DEFAULT_MAX_CHUNK_ITERATIONS,
                                        DEFAULT_SENSITIVE_COLUMNS, ScanOptions)
 
@@ -56,9 +61,15 @@ RELATIONS_PATH = "refs_relations.tsv"
 QUERY_IDENTITY_PATH = "refs_query_identity.tsv"
 QUERY_SIMILARITY_PATH = "refs_query_similarity.tsv"
 SPLIT_MANIFEST_PATH = "split_manifest.tsv"
-INCREMENTAL_CACHE_PATH = "incremental_cache.json"
-QUARANTINE_DIR = "quarantine"
 QUARANTINE_MANIFEST_PATH = "quarantine_manifest.tsv"
+
+# _quarantine/ is always excluded from the scan itself (see scan_tree's
+# skip_dirs) -- excluded/ holds files quarantine.extensions moved out
+# before the scan for not matching --extensions; bad_files/ holds files
+# quarantine.bad_files moved out after the scan for failing to parse.
+QUARANTINE_ROOT = "_quarantine"
+QUARANTINE_EXCLUDED_DIR = os.path.join(QUARANTINE_ROOT, "excluded")
+QUARANTINE_BAD_FILES_DIR = os.path.join(QUARANTINE_ROOT, "bad_files")
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -75,7 +86,11 @@ def main(argv: list[str] | None = None) -> None:
         description="Parse DB2 SQL into structured metadata (table/column/function/"
                     "predicate references, JOIN relationships) and detect hardcoded "
                     "sensitive values (IDs, policy numbers, Korean names), in .sql "
-                    "(and, by default, .txt) files.")
+                    "(and, by default, .txt) files. Every run also automatically "
+                    "quarantines non-matching-extension files into "
+                    "_quarantine/excluded/ and files that fail to parse into "
+                    "_quarantine/bad_files/ -- see README's Bad files / Quarantine "
+                    "sections.")
     ap.add_argument("root", help="Root directory to scan recursively")
     ap.add_argument("--sensitive-columns", nargs="+", default=list(DEFAULT_SENSITIVE_COLUMNS),
                     help="Sensitive column names (default: %(default)s)")
@@ -89,8 +104,9 @@ def main(argv: list[str] | None = None) -> None:
                         "parsing/statement_driver.py), and elapsed time -- a summary, not "
                         "a full profile, meant to show at a glance which file(s) in a "
                         "large tree are the slow ones and roughly why. The [i/N] progress "
-                        "line itself is always printed regardless of this flag "
-                        "(default: off)")
+                        "line itself is always printed regardless of this flag. Also adds "
+                        "a reason line under each _quarantine/excluded and "
+                        "_quarantine/bad_files move (default: off)")
     ap.add_argument("--workers", type=int, default=1, metavar="N",
                     help="Scan files in N worker processes instead of one "
                         "(default: %(default)s, i.e. serial). Parsing is "
@@ -153,31 +169,6 @@ def main(argv: list[str] | None = None) -> None:
                         "own quote character; '0000' for an unquoted numeric "
                         "literal), everything else byte-for-byte identical. A file "
                         "with no findings is left untouched (default: off)")
-    ap.add_argument("--quarantine", action="store_true",
-                    help="Before scanning, recursively move every file under root whose "
-                        "extension isn't in --extensions into ./quarantine (created if "
-                        "needed), mirroring each file's path relative to root -- "
-                        "'sub/notes.docx' lands at 'quarantine/sub/notes.docx' -- so the "
-                        "folder it was found in stays visible. quarantine_manifest.tsv "
-                        "records one row per file moved (original path -> quarantine "
-                        "path). The scan itself only ever looked at --extensions files "
-                        "anyway, so this doesn't change what gets scanned -- it just "
-                        "clears everything else out of the tree first. Distinct from "
-                        "bad_files.tsv: a quarantined file is never even opened, since its "
-                        "extension ruled it out up front -- bad_files.tsv is for files "
-                        "that matched --extensions and got a real attempt but failed "
-                        "(default: off)")
-    ap.add_argument("--incremental", action="store_true",
-                    help="Skip re-scanning a file whose size+mtime and requested "
-                        "--extract-metadata/--split-selects flags both match its "
-                        "entry in incremental_cache.json from a previous run -- its "
-                        "cached results are merged into this run's reports exactly "
-                        "as if it had been freshly scanned, so refs_*.tsv/summary.md/"
-                        "split_manifest.tsv stay complete across incremental runs on "
-                        "a large tree instead of shrinking to just the files touched "
-                        "this run. A file with no cache entry, a changed fingerprint, "
-                        "or a cache entry recorded under a different flag combination "
-                        "is always scanned fresh (default: off)")
     args = ap.parse_args(argv)
 
     if args.query_similarity and not args.extract_metadata:
@@ -193,8 +184,9 @@ def main(argv: list[str] | None = None) -> None:
         sys.exit(2)
 
     # Files already marked bad on a previous run are skipped entirely this
-    # run (not even attempted) -- delete a row from bad_files.tsv (after
-    # fixing that file) to have it re-scanned on the next run.
+    # run (not even attempted) -- and, since quarantine_bad_files already
+    # physically moved them into _quarantine/bad_files/ the run they were
+    # found, there's usually nothing left at their original path anyway.
     previously_bad = load_bad_files(BAD_FILES_PATH)
 
     # stopwords.txt/known_names.txt are created empty (with a format-
@@ -215,7 +207,7 @@ def main(argv: list[str] | None = None) -> None:
     # .txt files).
     exclude_paths = {os.path.abspath(p) for p in
                      (SUMMARY_PATH, FINDINGS_PATH, STRINGS_PATH, STOPWORDS_PATH, KNOWN_NAMES_PATH,
-                      BAD_FILES_PATH,
+                      BAD_FILES_PATH, QUARANTINE_MANIFEST_PATH,
                       REFS_TABLES_PATH if args.extract_metadata else None,
                       REFS_COLUMNS_PATH if args.extract_metadata else None,
                       FUNCTIONS_PATH if args.extract_metadata else None,
@@ -223,24 +215,25 @@ def main(argv: list[str] | None = None) -> None:
                       QUERY_IDENTITY_PATH if args.extract_metadata else None,
                       QUERY_SIMILARITY_PATH if args.query_similarity else None,
                       SPLIT_MANIFEST_PATH if (args.split_selects or args.un_split_selects) else None,
-                      QUARANTINE_MANIFEST_PATH if args.quarantine else None) if p}
+                      ) if p}
     exclude_paths |= set(previously_bad)
 
     # dist/metchurial.py is carried into the target tree and run in place
     # (see README) -- .py isn't in DEFAULT_EXTENSIONS, so without this,
-    # --quarantine would move the very script that's currently executing
-    # out from under the interpreter.
+    # quarantine.extensions would move the very script that's currently
+    # executing out from under the interpreter.
     if sys.argv and sys.argv[0]:
         exclude_paths.add(os.path.abspath(sys.argv[0]))
 
-    # Also runs before the scan itself, ahead of --quarantine: restores
+    # Also runs before the scan itself, ahead of quarantining: restores
     # pre-split originals from a previous --split-selects run so the scan
-    # (and --quarantine, if also given) sees the reverted tree, not the
-    # split files. Rows that couldn't be reverted are written straight
-    # back to split_manifest.tsv rather than waiting for the scan to
-    # finish, since nothing else in this run touches that file when
-    # --split-selects itself is off (validated mutually exclusive above).
+    # sees the reverted tree, not the split files. Rows that couldn't be
+    # reverted are written straight back to split_manifest.tsv rather than
+    # waiting for the scan to finish, since nothing else in this run
+    # touches that file when --split-selects itself is off (validated
+    # mutually exclusive above).
     reverted_originals: list[str] = []
+    remaining_rows: list = []
     if args.un_split_selects:
         manifest_rows = load_split_manifest(SPLIT_MANIFEST_PATH)
         reverted_originals, remaining_rows = unsplit_module.revert_splits(
@@ -249,13 +242,20 @@ def main(argv: list[str] | None = None) -> None:
                       ["original_file", "split_file", "block_number", "total_blocks"],
                       remaining_rows)
 
-    # Runs before the scan itself: once this returns, everything left
-    # under args.root matches --extensions, so scan_tree sees exactly the
-    # same tree it would have anyway -- --quarantine changes what's left
-    # lying around afterward, not what gets scanned.
-    quarantine_rows = (quarantine_module.quarantine_non_matching(
-        args.root, tuple(args.extensions), QUARANTINE_DIR, exclude_paths=exclude_paths)
-        if args.quarantine else [])
+    # Runs before the scan itself, automatically on every run (not an
+    # opt-in flag): once this returns, everything left under args.root
+    # matches --extensions, so scan_tree sees exactly the same tree it
+    # would have anyway -- this changes what's left lying around
+    # afterward, not what gets scanned.
+    quarantine_rows = quarantine_module.quarantine_non_matching(
+        args.root, tuple(args.extensions), QUARANTINE_EXCLUDED_DIR, exclude_paths=exclude_paths)
+    for row in quarantine_rows:
+        print("[quarantine:excluded] {} -> {}".format(
+            row.original_file, row.quarantined_file), file=sys.stderr)
+        if args.verbose:
+            ext = os.path.splitext(row.original_file)[1]
+            print("        reason: extension '{}' not in --extensions".format(ext),
+                 file=sys.stderr)
 
     common = dict(
         sensitive_columns=tuple(args.sensitive_columns), stopwords=stopwords,
@@ -270,10 +270,10 @@ def main(argv: list[str] | None = None) -> None:
         if not args.verbose:
             return
         if result.bad_reason is not None:
+            # parse_stats is always None exactly when bad_reason is set
+            # (see models/results.py) -- nothing else to report here.
             print("        antlr: skipped -- [{}] {}".format(
                 result.bad_reason.category, result.bad_reason.message), file=sys.stderr)
-        elif result.parse_stats is None:
-            print("        antlr: reused from cache (--incremental)", file=sys.stderr)
         else:
             s = result.parse_stats
             print("        antlr: {} chunk(s), {} iteration(s) "
@@ -281,41 +281,40 @@ def main(argv: list[str] | None = None) -> None:
                      s.chunks, s.iterations, s.tier1_structural, s.tier1_token_scan,
                      s.tier2_resync, s.tier3_skip, s.elapsed_seconds), file=sys.stderr)
 
-    # --incremental: reuse a previous run's cached FileScanResult for any
-    # file whose (size, mtime_ns) and extract_*/split_selects mode both
-    # still match -- see incremental.py's module docstring for why those
-    # are the only two things checked. cached_results primes scan_tree
-    # with what's reusable; on_file_result captures every file's result
-    # (cached or freshly scanned) back into `incremental_cache`, which
-    # gets written out once the scan finishes so the next run benefits.
-    incremental_cache: dict[str, dict] = {}
-    cached_results: dict[str, object] = {}
-    mode = incremental_module.mode_signature(options)
-    if args.incremental:
-        incremental_cache = incremental_module.load_cache(INCREMENTAL_CACHE_PATH)
-        for abspath in list(incremental_cache):
-            cached = incremental_module.lookup(incremental_cache, abspath, mode)
-            if cached is not None:
-                cached_results[abspath] = cached
-        exclude_paths.add(os.path.abspath(INCREMENTAL_CACHE_PATH))
-
-    def on_file_result(path: str, result: object) -> None:
-        incremental_module.record(incremental_cache, os.path.abspath(path), mode, result)
-
+    # _quarantine/ is always excluded from the scan's own directory walk:
+    # a file quarantine_bad_files moved there on a previous run has a
+    # matching extension by definition, so without this it would be
+    # walked right back into and rescanned as if it were fresh input.
     tree = scan_tree(args.root, options, exclude_paths=exclude_paths,
-                     progress=print_progress,
-                     cached_results=cached_results if args.incremental else None,
-                     on_file_result=on_file_result if args.incremental else None)
+                     skip_dirs={os.path.abspath(QUARANTINE_ROOT)},
+                     progress=print_progress)
 
-    if args.incremental:
-        incremental_module.save_cache(INCREMENTAL_CACHE_PATH, incremental_cache)
+    # Automatic on every run, not an opt-in flag: a file that just failed
+    # to parse was never checked for sensitive content either, so leaving
+    # it sitting in a tree about to be compressed and shipped outside the
+    # company is the one outcome this can't allow. Only tree.bad_files
+    # (flagged *this* run) is ever moved -- a previously_bad entry was
+    # never re-scanned, so it isn't still sitting at its original path to
+    # move in the first place (see quarantine.bad_files's own docstring).
+    newly_quarantined_bad = quarantine_module.quarantine_bad_files(
+        tree.bad_files, args.root, QUARANTINE_BAD_FILES_DIR,
+        warn=lambda msg: print(msg, file=sys.stderr))
+    for path, reason in newly_quarantined_bad.items():
+        if not reason.quarantined_file:
+            continue  # move failed -- already warned above
+        print("[quarantine:bad_file] {} -> {}".format(path, reason.quarantined_file),
+             file=sys.stderr)
+        if args.verbose:
+            print("        reason: [{}] {}".format(reason.category, reason.message),
+                 file=sys.stderr)
 
     # Preserve skipped (still-unfixed) entries from previous runs, and add
-    # anything newly flagged this run -- a file the user removed from
-    # bad_files.tsv and that scanned clean this time simply doesn't appear
-    # in either set, so it naturally drops off the list.
+    # anything newly flagged (and just quarantined) this run -- a file the
+    # user removed from bad_files.tsv and that scanned clean this time
+    # simply doesn't appear in either set, so it naturally drops off the
+    # list.
     all_bad = dict(previously_bad)
-    all_bad.update(tree.bad_files)
+    all_bad.update(newly_quarantined_bad)
     write_bad_files(BAD_FILES_PATH, all_bad)
 
     relations_summary = (relations_module.aggregate_edges(tree.relation_edges)
@@ -335,8 +334,7 @@ def main(argv: list[str] | None = None) -> None:
         "workers": args.workers, "max_chunk_iterations": args.max_chunk_iterations,
         "extract_metadata": args.extract_metadata, "query_similarity": args.query_similarity,
         "split_selects": args.split_selects, "un_split_selects": args.un_split_selects,
-        "mask_literals": args.mask_literals, "incremental": args.incremental,
-        "quarantine": args.quarantine,
+        "mask_literals": args.mask_literals,
         "verbose": args.verbose,
     }
     write_markdown_report(
@@ -386,19 +384,17 @@ def main(argv: list[str] | None = None) -> None:
                       ["original_file", "split_file", "block_number", "total_blocks"],
                       split_rows)
 
-    if args.quarantine:
-        write_refs_tsv(QUARANTINE_MANIFEST_PATH,
-                      ["original_file", "quarantined_file"], quarantine_rows)
+    write_refs_tsv(QUARANTINE_MANIFEST_PATH,
+                  ["original_file", "quarantined_file"], quarantine_rows)
 
     if args.un_split_selects:
         print("Un-split       : {} original file(s) restored, {} row(s) left in {} "
              "(missing files or incomplete groups)".format(
                  len(reverted_originals), len(remaining_rows),
                  os.path.abspath(SPLIT_MANIFEST_PATH)))
-    if args.quarantine:
-        print("Quarantine     : {} non-matching file(s) moved to {} -- see {}".format(
-            len(quarantine_rows), os.path.abspath(QUARANTINE_DIR),
-            os.path.abspath(QUARANTINE_MANIFEST_PATH)))
+    print("Excluded       : {} non-matching file(s) moved to {} -- see {}".format(
+        len(quarantine_rows), os.path.abspath(QUARANTINE_EXCLUDED_DIR),
+        os.path.abspath(QUARANTINE_MANIFEST_PATH)))
     print("Scanned {} file(s) (.{}). Findings: {}".format(
         tree.file_count, ", .".join(args.extensions), len(tree.findings)))
     print("Summary        : {}".format(os.path.abspath(SUMMARY_PATH)))
@@ -431,12 +427,9 @@ def main(argv: list[str] | None = None) -> None:
             len(masked_written)))
     if previously_bad or tree.bad_files:
         print("Bad files      : {} skipped (already in bad_files.tsv), {} newly flagged "
-             "this run -- see {}".format(
-                 len(previously_bad), len(tree.bad_files), os.path.abspath(BAD_FILES_PATH)))
-    if args.incremental:
-        print("Incremental    : {} file(s) reused from cache, {} scanned fresh -- see {}".format(
-            len(cached_results), tree.file_count - len(cached_results),
-            os.path.abspath(INCREMENTAL_CACHE_PATH)))
+             "and moved to {} this run -- see {}".format(
+                 len(previously_bad), len(tree.bad_files),
+                 os.path.abspath(QUARANTINE_BAD_FILES_DIR), os.path.abspath(BAD_FILES_PATH)))
 
     sys.exit(1 if all_findings else 0)
 

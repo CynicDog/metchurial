@@ -19,7 +19,7 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
 from metchurial import cli  # noqa: E402
-from metchurial import unsplit  # noqa: E402
+from metchurial.split import unsplit  # noqa: E402
 from metchurial.io_utils import load_split_manifest  # noqa: E402
 from metchurial.models.split import SplitManifestRow  # noqa: E402
 from metchurial.tsv import write_refs_tsv  # noqa: E402

@@ -19,9 +19,8 @@ from metchurial.models.split import SplitManifestRow
 class FileScanResult:
     """Everything scan_file() produces for one file. `bad_reason` is None
     on a normal scan; otherwise a short human-readable skip reason, with
-    every other field empty/zero. `parse_stats` is None for a bad file or
-    a --incremental cache hit (no fresh ANTLR work happened this run to
-    report on) -- see cli.py's --verbose summary line."""
+    every other field empty/zero. `parse_stats` is None for a bad file
+    (no ANTLR work happened) -- see cli.py's --verbose summary line."""
 
     findings: list[Finding] = field(default_factory=list)
     name_candidates: list[str] = field(default_factory=list)

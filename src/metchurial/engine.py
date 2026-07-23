@@ -483,9 +483,11 @@ def _is_stale_split_output(name: str, sibling_names: set[str]) -> bool:
 
 
 def _matching_files(root: str, suffixes: tuple[str, ...], extensions: tuple[str, ...],
-                    exclude_paths: set[str]) -> Iterator[str]:
+                    exclude_paths: set[str], skip_dirs: set[str]) -> Iterator[str]:
     known_extensions = _known_extensions(extensions)
-    for dirpath, _dirnames, filenames in os.walk(root):
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames
+                      if os.path.abspath(os.path.join(dirpath, d)) not in skip_dirs]
         name_set = set(filenames)
         candidates = [name for name in filenames if name.lower().endswith(suffixes)
                      and not _is_stale_split_output(name, name_set)]
@@ -515,9 +517,8 @@ def _merge_result(tree: TreeScanResult, path: str, result: FileScanResult,
 
 def scan_tree(root: str, options: ScanOptions | None = None, *,
               exclude_paths: set[str] | None = None,
+              skip_dirs: set[str] | None = None,
               progress: ProgressFn | None = None,
-              cached_results: dict[str, FileScanResult] | None = None,
-              on_file_result: Callable[[str, FileScanResult], None] | None = None,
               ) -> TreeScanResult:
     """Recursively scans files under root whose extension is in
     `options.extensions` (case-insensitive, without the dot). Returns a
@@ -539,20 +540,18 @@ def scan_tree(root: str, options: ScanOptions | None = None, *,
     the scanner's own output files from being scanned if they happen to
     live inside the scanned tree.
 
+    `skip_dirs` is an optional set of absolute directory paths never to
+    descend into at all -- unlike `exclude_paths` (individual files),
+    this prunes a whole subtree from os.walk. cli.py always passes
+    _quarantine/'s own path here: a bad file quarantined there on a
+    previous run (see quarantine.bad_files) has a matching extension by
+    definition, so without this it would be walked right back into and
+    rescanned as if it were fresh input.
+
     `progress`, if given, is called as progress(i, total, path, result) as
     each file finishes -- the library itself never prints (cli.py passes
     a stderr printer here, unconditionally on now; --verbose only changes
     how much that printer shows per file).
-
-    `cached_results`, if given, maps abspath -> a previously-computed
-    FileScanResult to reuse instead of calling scan_file() for that path
-    (--incremental; see incremental.py, which owns fingerprint/mode
-    matching -- this function only consumes whatever the caller already
-    decided is reusable). A file not present here is scanned normally.
-    `on_file_result`, if given, is called as on_file_result(path, result)
-    for every file once its result (cached or freshly scanned) is known
-    -- lets a caller (cli.py) persist an updated cache without engine.py
-    needing to know anything about cache file formats itself.
 
     `options.workers` > 1 scans files in separate processes
     (concurrent.futures.ProcessPoolExecutor -- parsing is CPU-bound pure
@@ -568,44 +567,29 @@ def scan_tree(root: str, options: ScanOptions | None = None, *,
     options = options if options is not None else ScanOptions()
     suffixes = extension_suffixes(options.extensions)
     exclude_paths = exclude_paths or set()
-    cached_results = cached_results or {}
+    skip_dirs = skip_dirs or set()
     tree = TreeScanResult()
 
-    files = list(_matching_files(root, suffixes, options.extensions, exclude_paths))
+    files = list(_matching_files(root, suffixes, options.extensions, exclude_paths, skip_dirs))
     tree.file_count = len(files)
-
-    def merge_one(full: str, result: FileScanResult) -> None:
-        _merge_result(tree, full, result, options.split_selects)
-        if on_file_result:
-            on_file_result(full, result)
 
     if options.workers <= 1:
         for i, full in enumerate(files, 1):
-            cached = cached_results.get(os.path.abspath(full))
-            result = cached if cached is not None else scan_file(full, options)
-            merge_one(full, result)
+            result = scan_file(full, options)
+            _merge_result(tree, full, result, options.split_selects)
             if progress:
                 progress(i, tree.file_count, full, result)
         return tree
 
     import concurrent.futures
 
-    to_scan = [f for f in files if os.path.abspath(f) not in cached_results]
-
     with concurrent.futures.ProcessPoolExecutor(max_workers=options.workers) as pool:
-        futures = {pool.submit(scan_file, full, options): full for full in to_scan}
+        futures = {pool.submit(scan_file, full, options): full for full in files}
         done = 0
-        for full in files:
-            cached = cached_results.get(os.path.abspath(full))
-            if cached is not None:
-                merge_one(full, cached)
-                done += 1
-                if progress:
-                    progress(done, tree.file_count, full, cached)
         for fut in concurrent.futures.as_completed(futures):
             full = futures[fut]
             result = fut.result()
-            merge_one(full, result)
+            _merge_result(tree, full, result, options.split_selects)
             done += 1
             if progress:
                 progress(done, tree.file_count, full, result)

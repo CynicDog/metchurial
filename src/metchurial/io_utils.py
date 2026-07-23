@@ -18,7 +18,7 @@ from metchurial.tsv import _clean
 ENCODINGS = ["utf-8-sig", "utf-8", "cp949", "euc-kr", "latin-1"]
 
 # bad_files.tsv column order -- keep in sync with load_bad_files/write_bad_files.
-_BAD_FILES_HEADER = ["path", "category", "item", "message"]
+_BAD_FILES_HEADER = ["path", "category", "item", "message", "quarantined_file"]
 
 
 def read_text(path: str) -> tuple[str, str]:
@@ -52,12 +52,14 @@ def _for_each_line(path: str, handle_line: Callable[[str], None]) -> None:
 
 def load_bad_files(path: str) -> dict[str, BadFileReason]:
     """Load a persistent bad_files.tsv (see cli.py's skip-list workflow):
-    one file per row -- path, category, item, message, tab-separated,
-    fixed header row first (same conventions as tsv.write_refs_tsv).
-    Returns {abspath: BadFileReason} for every entry. A missing file is
-    the normal first-run state, so this returns an empty dict silently
-    rather than warning (unlike load_stopwords/load_known_names below,
-    where a missing file is unexpected)."""
+    one file per row -- path, category, item, message, quarantined_file,
+    tab-separated, fixed header row first (same conventions as
+    tsv.write_refs_tsv). Returns {abspath: BadFileReason} for every entry.
+    A missing file is the normal first-run state, so this returns an empty
+    dict silently rather than warning (unlike load_stopwords/
+    load_known_names below, where a missing file is unexpected).
+    `quarantined_file` defaults to "" for a row written before that column
+    existed, so an old bad_files.tsv still loads cleanly."""
     entries: dict[str, BadFileReason] = {}
     if not path or not os.path.isfile(path):
         return entries
@@ -79,7 +81,10 @@ def load_bad_files(path: str) -> dict[str, BadFileReason]:
         category = parts[1] if len(parts) > 1 else ""
         item = parts[2] if len(parts) > 2 else ""
         message = parts[3] if len(parts) > 3 else ""
-        entries[os.path.abspath(p)] = BadFileReason(category=category, item=item, message=message)
+        quarantined_file = parts[4] if len(parts) > 4 else ""
+        entries[os.path.abspath(p)] = BadFileReason(
+            category=category, item=item, message=message,
+            quarantined_file=quarantined_file)
 
     _for_each_line(path, add_entry)
     return entries
@@ -87,17 +92,23 @@ def load_bad_files(path: str) -> dict[str, BadFileReason]:
 
 def write_bad_files(path: str, entries: dict[str, BadFileReason]) -> None:
     """Writes bad_files.tsv: one row per file -- path, category, item,
-    message, tab-separated, sorted by path for stable diffs across runs,
-    same conventions as tsv.write_refs_tsv (utf-8-sig, header row always
-    written, embedded tabs/newlines stripped from every cell). `entries`:
-    {path: BadFileReason}. Deleting a data row (keeping the header) lets
-    that file be re-scanned on the next run instead of skipped."""
+    message, quarantined_file, tab-separated, sorted by path for stable
+    diffs across runs, same conventions as tsv.write_refs_tsv (utf-8-sig,
+    header row always written, embedded tabs/newlines stripped from every
+    cell). `entries`: {path: BadFileReason}. `path` itself is the file's
+    *original* location -- once quarantine.bad_files.quarantine_bad_files
+    has moved it, that's no longer where it is on disk, but the row is
+    kept (not deleted) with `quarantined_file` pointing at its new
+    location, so the original path and the reason stay on record.
+    Deleting a data row (keeping the header) lets that path be scanned
+    fresh again on the next run, if a file is ever put back there."""
     with open(path, "w", encoding="utf-8-sig", newline="") as f:
         f.write("\t".join(_BAD_FILES_HEADER) + "\n")
         for p in sorted(entries):
             reason = entries[p]
             f.write("\t".join(_clean(v) for v in
-                              (p, reason.category, reason.item, reason.message)) + "\n")
+                              (p, reason.category, reason.item, reason.message,
+                               reason.quarantined_file)) + "\n")
 
 
 def load_split_manifest(path: str) -> list[SplitManifestRow]:

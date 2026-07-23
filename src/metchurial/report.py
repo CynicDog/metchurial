@@ -127,8 +127,6 @@ def _write_run_info(out: TextIO, run_info: dict[str, Any]) -> None:
     out.write("| Un-split selects | {} |\n".format(
         "ON" if run_info["un_split_selects"] else "OFF"))
     out.write("| Mask literals | {} |\n".format("ON" if run_info["mask_literals"] else "OFF"))
-    out.write("| Incremental | {} |\n".format("ON" if run_info["incremental"] else "OFF"))
-    out.write("| Quarantine | {} |\n".format("ON" if run_info["quarantine"] else "OFF"))
     out.write("| Verbose | {} |\n\n".format("ON" if run_info["verbose"] else "OFF"))
 
 
@@ -197,14 +195,17 @@ def _write_bad_files(out: TextIO, previously_bad: dict[str, BadFileReason],
     if not all_bad:
         out.write("No bad files skipped or flagged.\n\n")
         return
-    out.write("{} skipped (already in bad_files.tsv), {} newly flagged this run. "
-              "Full list in bad_files.tsv.\n\n".format(len(previously_bad), len(new_bad)))
-    out.write("| File | Category | Reason | Newly flagged |\n|---|---|---|---|\n")
+    out.write("{} skipped (already in bad_files.tsv), {} newly flagged and moved to "
+              "_quarantine/bad_files/ this run. Full list in bad_files.tsv.\n\n".format(
+                  len(previously_bad), len(new_bad)))
+    out.write("| File | Category | Reason | Newly flagged | Quarantined To |\n"
+              "|---|---|---|---|---|\n")
     for fpath in sorted(all_bad)[:MAX_GROUPED_VALUES]:
         reason = all_bad[fpath]
-        out.write("| `{}` | {} | {} | {} |\n".format(
+        out.write("| `{}` | {} | {} | {} | {} |\n".format(
             md_escape(fpath), md_escape(reason.category), md_escape(reason.message),
-            "Y" if fpath in new_bad else "N"))
+            "Y" if fpath in new_bad else "N",
+            "`{}`".format(md_escape(reason.quarantined_file)) if reason.quarantined_file else "-"))
     if len(all_bad) > MAX_GROUPED_VALUES:
         out.write("\n_...+{} more, see bad_files.tsv._\n".format(len(all_bad) - MAX_GROUPED_VALUES))
     out.write("\n")
@@ -359,7 +360,7 @@ def write_markdown_report(path: str, run_info: dict[str, Any], tree: TreeScanRes
     `run_info`: {invocation, root, file_count, sensitive_columns,
     extensions, workers, max_chunk_iterations, extract_metadata,
     query_similarity, split_selects, un_split_selects, mask_literals,
-    incremental, quarantine, verbose}."""
+    verbose}."""
     with open(path, "w", encoding="utf-8-sig") as out:
         _write_run_info(out, run_info)
         if extract_metadata:
