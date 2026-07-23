@@ -3,8 +3,8 @@
 given root, and writes every output artifact (summary.md, findings.tsv,
 strings.txt, stopwords.txt, known_names.txt, bad_files.tsv, the
 --extract-metadata refs_*.tsv files, the --split-selects
-split_manifest.tsv, and the --incremental incremental_cache.json) into
-the current working directory.
+split_manifest.tsv, the --incremental incremental_cache.json, and the
+--quarantine quarantine_manifest.tsv) into the current working directory.
 """
 
 from __future__ import annotations
@@ -22,6 +22,7 @@ from metchurial.report import write_markdown_report, write_tsv_report, write_str
 from metchurial.tsv import write_refs_tsv
 from metchurial.engine import scan_tree
 from metchurial import incremental as incremental_module
+from metchurial import quarantine as quarantine_module
 from metchurial.models.options import (DEFAULT_EXTENSIONS, DEFAULT_MAX_CHUNK_ITERATIONS,
                                        DEFAULT_SENSITIVE_COLUMNS, ScanOptions)
 
@@ -53,6 +54,8 @@ QUERY_IDENTITY_PATH = "refs_query_identity.tsv"
 QUERY_SIMILARITY_PATH = "refs_query_similarity.tsv"
 SPLIT_MANIFEST_PATH = "split_manifest.tsv"
 INCREMENTAL_CACHE_PATH = "incremental_cache.json"
+QUARANTINE_DIR = "quarantine"
+QUARANTINE_MANIFEST_PATH = "quarantine_manifest.tsv"
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -135,6 +138,16 @@ def main(argv: list[str] | None = None) -> None:
                         "own quote character; '0000' for an unquoted numeric "
                         "literal), everything else byte-for-byte identical. A file "
                         "with no findings is left untouched (default: off)")
+    ap.add_argument("--quarantine", action="store_true",
+                    help="Before scanning, recursively move every file under root whose "
+                        "extension isn't in --extensions into ./quarantine (created if "
+                        "needed), mirroring each file's path relative to root -- "
+                        "'sub/notes.docx' lands at 'quarantine/sub/notes.docx' -- so the "
+                        "folder it was found in stays visible. quarantine_manifest.tsv "
+                        "records one row per file moved (original path -> quarantine "
+                        "path). The scan itself only ever looked at --extensions files "
+                        "anyway, so this doesn't change what gets scanned -- it just "
+                        "clears everything else out of the tree first (default: off)")
     ap.add_argument("--incremental", action="store_true",
                     help="Skip re-scanning a file whose size+mtime and requested "
                         "--extract-metadata/--split-selects flags both match its "
@@ -186,8 +199,17 @@ def main(argv: list[str] | None = None) -> None:
                       RELATIONS_PATH if args.extract_metadata else None,
                       QUERY_IDENTITY_PATH if args.extract_metadata else None,
                       QUERY_SIMILARITY_PATH if args.query_similarity else None,
-                      SPLIT_MANIFEST_PATH if args.split_selects else None) if p}
+                      SPLIT_MANIFEST_PATH if args.split_selects else None,
+                      QUARANTINE_MANIFEST_PATH if args.quarantine else None) if p}
     exclude_paths |= set(previously_bad)
+
+    # Runs before the scan itself: once this returns, everything left
+    # under args.root matches --extensions, so scan_tree sees exactly the
+    # same tree it would have anyway -- --quarantine changes what's left
+    # lying around afterward, not what gets scanned.
+    quarantine_rows = (quarantine_module.quarantine_non_matching(
+        args.root, tuple(args.extensions), QUARANTINE_DIR, exclude_paths=exclude_paths)
+        if args.quarantine else [])
 
     common = dict(
         sensitive_columns=tuple(args.sensitive_columns), stopwords=stopwords,
@@ -268,6 +290,7 @@ def main(argv: list[str] | None = None) -> None:
         "extract_metadata": args.extract_metadata, "query_similarity": args.query_similarity,
         "split_selects": args.split_selects,
         "mask_literals": args.mask_literals, "incremental": args.incremental,
+        "quarantine": args.quarantine,
         "verbose": args.verbose,
     }
     write_markdown_report(
@@ -317,6 +340,14 @@ def main(argv: list[str] | None = None) -> None:
                       ["original_file", "split_file", "block_number", "total_blocks"],
                       split_rows)
 
+    if args.quarantine:
+        write_refs_tsv(QUARANTINE_MANIFEST_PATH,
+                      ["original_file", "quarantined_file"], quarantine_rows)
+
+    if args.quarantine:
+        print("Quarantine     : {} non-matching file(s) moved to {} -- see {}".format(
+            len(quarantine_rows), os.path.abspath(QUARANTINE_DIR),
+            os.path.abspath(QUARANTINE_MANIFEST_PATH)))
     print("Scanned {} file(s) (.{}). Findings: {}".format(
         tree.file_count, ", .".join(args.extensions), len(tree.findings)))
     print("Summary        : {}".format(os.path.abspath(SUMMARY_PATH)))

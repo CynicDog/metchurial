@@ -126,6 +126,7 @@ def _write_run_info(out: TextIO, run_info: dict[str, Any]) -> None:
     out.write("| Split selects | {} |\n".format("ON" if run_info["split_selects"] else "OFF"))
     out.write("| Mask literals | {} |\n".format("ON" if run_info["mask_literals"] else "OFF"))
     out.write("| Incremental | {} |\n".format("ON" if run_info["incremental"] else "OFF"))
+    out.write("| Quarantine | {} |\n".format("ON" if run_info["quarantine"] else "OFF"))
     out.write("| Verbose | {} |\n\n".format("ON" if run_info["verbose"] else "OFF"))
 
 
@@ -355,7 +356,8 @@ def write_markdown_report(path: str, run_info: dict[str, Any], tree: TreeScanRes
     at a similarity file that wasn't written.
     `run_info`: {invocation, root, file_count, sensitive_columns,
     extensions, workers, max_chunk_iterations, extract_metadata,
-    query_similarity, split_selects, mask_literals, verbose}."""
+    query_similarity, split_selects, mask_literals, incremental,
+    quarantine, verbose}."""
     with open(path, "w", encoding="utf-8-sig") as out:
         _write_run_info(out, run_info)
         if extract_metadata:

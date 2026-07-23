@@ -20,6 +20,7 @@ that same parse tree, as specific analyses layered on top of it.
 | **Sensitive-value detection** — sensitive-column comparisons and known-name literals | *(default, always on)* | [What it detects](#what-it-detects) |
 | **File splitting** — one file per standalone SELECT block | `--split-selects` | [Output artifacts](#output-artifacts) |
 | **Literal masking** — rewrite flagged literals to fixed placeholders in place | `--mask-literals` | [Output artifacts](#output-artifacts) |
+| **Quarantine** — move every non-matching-extension file out of the scan root before scanning | `--quarantine` | [Output artifacts](#output-artifacts) |
 
 ## Quick start
 
@@ -48,6 +49,7 @@ python metchurial.py C:\sql\root `
 
 python metchurial.py C:\sql\root --mask-literals
 python metchurial.py C:\sql\root --workers 8 --verbose
+python metchurial.py C:\sql\root --extensions sql --quarantine
 ```
 
 Every run writes its artifacts (`summary.md`, `findings.tsv`, ...) into the
@@ -169,6 +171,7 @@ literals are sensitive or which unparseable files are safe to ignore.
 | `--workers N` | `1` | Scan across N worker processes instead of one |
 | `--max-chunk-iterations N` | `200000` | Safety-valve cap on the resync driver's loop iterations per statement chunk |
 | `--incremental` | off | Skip re-scanning a file whose size+mtime and extract-metadata/split-selects flags both match its entry in `incremental_cache.json` from a previous run; its cached results are merged into this run's reports as if freshly scanned, so `refs_*.tsv`/`summary.md`/`split_manifest.tsv` stay complete across incremental runs on a large tree |
+| `--quarantine` | off | Before scanning, recursively move every file under `root` whose extension isn't in `--extensions` into `./quarantine` (created as needed), mirroring each file's path relative to `root` so the folder it came from stays visible (`sub/notes.docx` → `quarantine/sub/notes.docx`); `quarantine_manifest.tsv` records one row per file moved. Doesn't change what gets scanned — the scan only ever looked at `--extensions` files anyway — it just clears everything else out of the tree |
 | `--verbose` | off | Also print a one-line ANTLR processing summary (chunk count, tiered-loop iteration breakdown, elapsed time) to stderr after each file's `[i/N]` progress line, which itself is always printed regardless of this flag |
 
 `--workers N` scans files across N worker processes (`concurrent.futures.
@@ -271,6 +274,7 @@ not a duplicate of it.
 | `refs_query_identity.tsv` | `--extract-metadata` | One `core_id` per statement — structurally identical statements share one id regardless of aliasing/projection/formatting differences |
 | `refs_query_similarity.tsv` | `--query-similarity` | Pairwise Jaccard similarity between distinct `core_id`s that don't match exactly |
 | `split_manifest.tsv` | `--split-selects` | One row per split file actually written: `original_file`, `split_file`, `block_number`, `total_blocks` -- the record of which now-deleted original each split file came from |
+| `quarantine_manifest.tsv` | `--quarantine` | One row per file moved out of the scan root: `original_file`, `quarantined_file` |
 
 ## Bad files
 
