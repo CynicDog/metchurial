@@ -203,6 +203,13 @@ def main(argv: list[str] | None = None) -> None:
                       QUARANTINE_MANIFEST_PATH if args.quarantine else None) if p}
     exclude_paths |= set(previously_bad)
 
+    # dist/metchurial.py is carried into the target tree and run in place
+    # (see README) -- .py isn't in DEFAULT_EXTENSIONS, so without this,
+    # --quarantine would move the very script that's currently executing
+    # out from under the interpreter.
+    if sys.argv and sys.argv[0]:
+        exclude_paths.add(os.path.abspath(sys.argv[0]))
+
     # Runs before the scan itself: once this returns, everything left
     # under args.root matches --extensions, so scan_tree sees exactly the
     # same tree it would have anyway -- --quarantine changes what's left

@@ -157,6 +157,24 @@ class TestQuarantineCLI(unittest.TestCase):
         self.assertTrue(os.path.isfile("quarantine_manifest.tsv"))
         self.assertTrue(os.path.isfile(os.path.join("quarantine", "notes.docx")))
 
+    def test_does_not_quarantine_its_own_running_script(self):
+        # dist/metchurial.py is carried into and run from inside the tree
+        # it scans (see README) -- .py isn't in --extensions, so without
+        # excluding sys.argv[0], this would quarantine the very script
+        # that's currently executing.
+        own_script = os.path.join(self.sql_root, "metchurial.py")
+        with open(own_script, "w", encoding="utf-8") as f:
+            f.write("# pretend entry point\n")
+        prev_argv0 = sys.argv[0]
+        sys.argv[0] = own_script
+        try:
+            self._run([self.sql_root, "--extensions", "sql", "--quarantine"])
+        finally:
+            sys.argv[0] = prev_argv0
+
+        self.assertTrue(os.path.isfile(own_script))
+        self.assertFalse(os.path.exists(os.path.join("quarantine", "metchurial.py")))
+
 
 if __name__ == "__main__":
     unittest.main()
