@@ -183,7 +183,18 @@ def _scan_file_body(path: str, text: str, enc: str, options: ScanOptions,
     # off it directly (table_scan's token-scan) rather than the parse tree.
     query_identity_chunks: list[tuple[list[QueryBlock], Any, int | None, list[Token]]] = []
     lines = text.splitlines()
-    seen_hit_lines: set[int] = set()
+    # Exact (start_offset, end_offset) of every literal already reported as
+    # a sensitive-column-comparison/assignment finding -- lets the
+    # known-name regex pass below skip only the *same* literal a
+    # comparison already caught (no point double-reporting one literal
+    # both ways), without silently dropping an unrelated name-shaped
+    # literal that just happens to share a line with it. Line-level
+    # suppression used to live here instead and was a real bug: e.g.
+    # "SET ACCT_ID = '1234567', ACCT_NM = '홍길동' WHERE CTRT_NO = '999'"
+    # is one line with three independent literals -- suppressing the
+    # whole line once CTRT_NO's comparison fired meant '홍길동' never
+    # reached strings.txt/known_names.txt at all, let alone got masked.
+    seen_hit_spans: set[tuple[int, int]] = set()
 
     def make_hit(column: str, operator: str, value: str, line: int, in_comment: str,
                  start_offset: int | None = None, end_offset: int | None = None) -> None:
@@ -202,7 +213,8 @@ def _scan_file_body(path: str, text: str, enc: str, options: ScanOptions,
             start_offset=start_offset,
             end_offset=end_offset,
         ))
-        seen_hit_lines.add(line)
+        if start_offset is not None and end_offset is not None:
+            seen_hit_spans.add((start_offset, end_offset))
 
     visitor = ExtractorVisitor(
         columns,
@@ -329,8 +341,8 @@ def _scan_file_body(path: str, text: str, enc: str, options: ScanOptions,
     for m in NAME_LITERAL_RE.finditer(text):
         pos = m.start()
         ln = _line_of(offsets, pos)
-        if ln in seen_hit_lines:
-            continue  # already reported as a finding on this line
+        if (pos, m.end() - 1) in seen_hit_spans:
+            continue  # this exact literal already reported as a finding
         word = m.group(1)
         if word in known_names:
             # m.end() is exclusive; -1 converts to the 0-based

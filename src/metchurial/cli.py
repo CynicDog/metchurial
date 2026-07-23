@@ -5,6 +5,8 @@ strings.txt, stopwords.txt, known_names.txt, bad_files.tsv, the
 --extract-metadata refs_*.tsv files, the --split-selects
 split_manifest.tsv, the --incremental incremental_cache.json, and the
 --quarantine quarantine_manifest.tsv) into the current working directory.
+--un-split-selects instead consumes split_manifest.tsv to revert a
+previous --split-selects run, before the scan itself runs.
 """
 
 from __future__ import annotations
@@ -17,12 +19,13 @@ import sys
 from metchurial.references import query_identity as query_identity_module
 from metchurial.references import relations as relations_module
 from metchurial.io_utils import (ensure_known_names_template, ensure_stopwords_template, load_bad_files,
-                          load_known_names, load_stopwords, write_bad_files)
+                          load_known_names, load_split_manifest, load_stopwords, write_bad_files)
 from metchurial.report import write_markdown_report, write_tsv_report, write_strings_file
 from metchurial.tsv import write_refs_tsv
 from metchurial.engine import scan_tree
 from metchurial import incremental as incremental_module
 from metchurial import quarantine as quarantine_module
+from metchurial import unsplit as unsplit_module
 from metchurial.models.options import (DEFAULT_EXTENSIONS, DEFAULT_MAX_CHUNK_ITERATIONS,
                                        DEFAULT_SENSITIVE_COLUMNS, ScanOptions)
 
@@ -131,6 +134,18 @@ def main(argv: list[str] | None = None) -> None:
                         "CTE bodies are never miscounted as their own block. Only safe "
                         "to run against a tree you already have a separate copy of "
                         "(default: off)")
+    ap.add_argument("--un-split-selects", action="store_true",
+                    help="Before scanning, revert a previous --split-selects run using "
+                        "split_manifest.tsv: for each original_file it records, if every one "
+                        "of its split files is still present and original_file hasn't been "
+                        "recreated since, concatenates the split files' current content back "
+                        "together (in block_number order) into original_file and deletes the "
+                        "split files -- best-effort, not a byte-for-byte undo, since the "
+                        "original inter-statement whitespace was already discarded at split "
+                        "time. A group missing a split file, an incomplete group, or one whose "
+                        "original_file already exists again is left alone and stays in "
+                        "split_manifest.tsv. Mutually exclusive with --split-selects "
+                        "(default: off)")
     ap.add_argument("--mask-literals", action="store_true",
                     help="Rewrite in place each file with a finding: "
                         "every flagged literal's content is replaced with a fixed "
@@ -169,6 +184,10 @@ def main(argv: list[str] | None = None) -> None:
         ap.error("--query-similarity requires --extract-metadata "
                  "(it scores the core_ids metadata extraction discovers)")
 
+    if args.un_split_selects and args.split_selects:
+        ap.error("--un-split-selects and --split-selects are mutually exclusive "
+                 "(one reverts a previous split, the other performs a new one)")
+
     if not os.path.isdir(args.root):
         print("ERROR: not a directory: {}".format(args.root), file=sys.stderr)
         sys.exit(2)
@@ -203,7 +222,7 @@ def main(argv: list[str] | None = None) -> None:
                       RELATIONS_PATH if args.extract_metadata else None,
                       QUERY_IDENTITY_PATH if args.extract_metadata else None,
                       QUERY_SIMILARITY_PATH if args.query_similarity else None,
-                      SPLIT_MANIFEST_PATH if args.split_selects else None,
+                      SPLIT_MANIFEST_PATH if (args.split_selects or args.un_split_selects) else None,
                       QUARANTINE_MANIFEST_PATH if args.quarantine else None) if p}
     exclude_paths |= set(previously_bad)
 
@@ -213,6 +232,22 @@ def main(argv: list[str] | None = None) -> None:
     # out from under the interpreter.
     if sys.argv and sys.argv[0]:
         exclude_paths.add(os.path.abspath(sys.argv[0]))
+
+    # Also runs before the scan itself, ahead of --quarantine: restores
+    # pre-split originals from a previous --split-selects run so the scan
+    # (and --quarantine, if also given) sees the reverted tree, not the
+    # split files. Rows that couldn't be reverted are written straight
+    # back to split_manifest.tsv rather than waiting for the scan to
+    # finish, since nothing else in this run touches that file when
+    # --split-selects itself is off (validated mutually exclusive above).
+    reverted_originals: list[str] = []
+    if args.un_split_selects:
+        manifest_rows = load_split_manifest(SPLIT_MANIFEST_PATH)
+        reverted_originals, remaining_rows = unsplit_module.revert_splits(
+            manifest_rows, warn=lambda msg: print(msg, file=sys.stderr))
+        write_refs_tsv(SPLIT_MANIFEST_PATH,
+                      ["original_file", "split_file", "block_number", "total_blocks"],
+                      remaining_rows)
 
     # Runs before the scan itself: once this returns, everything left
     # under args.root matches --extensions, so scan_tree sees exactly the
@@ -299,7 +334,7 @@ def main(argv: list[str] | None = None) -> None:
         "sensitive_columns": args.sensitive_columns, "extensions": args.extensions,
         "workers": args.workers, "max_chunk_iterations": args.max_chunk_iterations,
         "extract_metadata": args.extract_metadata, "query_similarity": args.query_similarity,
-        "split_selects": args.split_selects,
+        "split_selects": args.split_selects, "un_split_selects": args.un_split_selects,
         "mask_literals": args.mask_literals, "incremental": args.incremental,
         "quarantine": args.quarantine,
         "verbose": args.verbose,
@@ -355,6 +390,11 @@ def main(argv: list[str] | None = None) -> None:
         write_refs_tsv(QUARANTINE_MANIFEST_PATH,
                       ["original_file", "quarantined_file"], quarantine_rows)
 
+    if args.un_split_selects:
+        print("Un-split       : {} original file(s) restored, {} row(s) left in {} "
+             "(missing files or incomplete groups)".format(
+                 len(reverted_originals), len(remaining_rows),
+                 os.path.abspath(SPLIT_MANIFEST_PATH)))
     if args.quarantine:
         print("Quarantine     : {} non-matching file(s) moved to {} -- see {}".format(
             len(quarantine_rows), os.path.abspath(QUARANTINE_DIR),

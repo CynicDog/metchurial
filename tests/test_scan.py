@@ -175,6 +175,111 @@ class TestKoreanNames(unittest.TestCase):
         self.assertEqual(source[h.start_offset:h.end_offset + 1], '"홍길동"')
 
 
+class TestAssignmentDetection(unittest.TestCase):
+    """UPDATE ... SET col = 'literal' -- an assignment, a completely
+    different grammar rule from the predicate/comparison shapes
+    visitPredicate handles, so it needs its own visitor hook
+    (ExtractorVisitor.visitAssignment_item) or it's silently invisible to
+    sensitive-column detection regardless of how sensitive the column or
+    how real the literal is."""
+
+    def test_single_assignment_is_a_hit(self):
+        hits, _ = scan_text("UPDATE t1 SET ACCT_ID = '1234567' WHERE X = 1;")
+        acct_hits = [h for h in hits if h.column_name == "ACCT_ID"]
+        self.assertEqual(len(acct_hits), 1)
+        self.assertEqual(acct_hits[0].operator, "=")
+        self.assertEqual(acct_hits[0].value, "'1234567'")
+
+    def test_multiple_assignments_on_one_line_all_reported(self):
+        hits, _ = scan_text(
+            "UPDATE t1 SET ACCT_ID = '1234567', ACCT_NM = '9999', "
+            "CTRT_NO = '1112223' WHERE X = 1;")
+        by_col = {h.column_name: h.value for h in hits if h.column_name != "-"}
+        self.assertEqual(by_col.get("ACCT_ID"), "'1234567'")
+        self.assertEqual(by_col.get("ACCT_NM"), "'9999'")
+        self.assertEqual(by_col.get("CTRT_NO"), "'1112223'")
+
+    def test_non_sensitive_assignment_is_not_a_hit(self):
+        hits, _ = scan_text("UPDATE t1 SET DESCRIPTION = 'not sensitive' WHERE X = 1;")
+        self.assertEqual([h for h in hits if h.column_name == "DESCRIPTION"], [])
+
+    def test_assignment_to_another_column_is_not_a_hit(self):
+        # ACCT_ID assigned FROM another column (no literal on the right)
+        # must never be reported -- there's no hardcoded value here at all.
+        hits, _ = scan_text("UPDATE t1 SET ACCT_ID = OTHER_COL WHERE X = 1;")
+        self.assertEqual([h for h in hits if h.column_name == "ACCT_ID"], [])
+
+
+class TestSameLineFindingDoesNotSuppressUnrelatedNameCandidate(unittest.TestCase):
+    """Regression test: known-name matching used to skip an entire *line*
+    once any sensitive-column-comparison finding landed on it, so an
+    unrelated name-shaped literal sharing that line silently never reached
+    strings.txt/known_names.txt, let alone got masked. Fixed to dedup by
+    exact literal span instead of by line."""
+
+    def test_unrelated_name_literal_on_same_line_still_surfaces(self):
+        hits, name_candidates = scan_text(
+            "SELECT '홍길동', DESCRIPTION FROM T1 WHERE CTRT_NO = '9999999';")
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0].column_name, "CTRT_NO")
+        self.assertEqual(name_candidates, ["홍길동"])
+
+    def test_unrelated_name_literal_on_same_line_becomes_a_hit_when_known(self):
+        hits, name_candidates = scan_text(
+            "SELECT '홍길동', DESCRIPTION FROM T1 WHERE CTRT_NO = '9999999';",
+            known_names={"홍길동"})
+        self.assertEqual(len(hits), 2)
+        self.assertEqual({h.value for h in hits}, {"'홍길동'", "'9999999'"})
+        self.assertEqual(name_candidates, [])
+
+    def test_same_literal_caught_by_both_paths_is_not_double_reported(self):
+        # ACCT_NM is a sensitive column, so this literal is already a
+        # finding via the assignment/comparison path -- the known-name
+        # regex pass must not also emit a second, redundant finding for
+        # the exact same span.
+        hits, name_candidates = scan_text(
+            "UPDATE t1 SET ACCT_NM = '홍길동' WHERE X = 1;", known_names={"홍길동"})
+        matching = [h for h in hits if h.value == "'홍길동'"]
+        self.assertEqual(len(matching), 1)
+        self.assertEqual(matching[0].column_name, "ACCT_NM")
+        self.assertEqual(name_candidates, [])
+
+
+class TestInsertValuesDetection(unittest.TestCase):
+    """INSERT INTO t (col, ...) VALUES ('lit', ...) binds each value to its
+    column purely by position against the explicit column list --
+    ExtractorVisitor.visitInsert_statement implements this the same way
+    visitAssignment_item covers UPDATE...SET.
+
+    IMPORTANT: the vendored grammar (vendor/grammars-v4/Db2Parser.g4,
+    insert_statement rule) currently cannot parse this shape *at all* --
+    `INSERT INTO t (col) VALUES (...)` fails with "no viable alternative"
+    even though the EBNF (`column_name_list?` right after the table name)
+    looks correct on paper; `INSERT INTO t VALUES (...)` with no column
+    list parses fine. Reproduced with a bare `parser.sql_statement()`
+    call, no metchurial code involved -- this is an upstream grammar
+    limitation, not a bug in visitInsert_statement itself. The first test
+    below documents today's actual (unfortunate) behavior; the others show
+    the no-column-list case is deliberately never guessed at."""
+
+    def test_explicit_column_list_form_currently_produces_no_hit_at_all(self):
+        # This SHOULD be a hit once the grammar limitation above is
+        # worked around (e.g. a token-scan fallback, same pattern as the
+        # existing bare-paren/double-quoted-literal fallbacks) -- today it
+        # silently isn't, which is exactly the gap this test documents.
+        hits, _ = scan_text(
+            "INSERT INTO CUSTOMERS (ACCT_ID, ACCT_NM) VALUES ('1234567', '9999');")
+        self.assertEqual(hits, [])
+
+    def test_no_column_list_form_is_never_guessed_at(self):
+        # Parses fine, but with no column list there's no way to know
+        # which value lands in which column without the table's real DDL
+        # -- must not be reported at all rather than guessing positionally
+        # against some assumed column order.
+        hits, _ = scan_text("INSERT INTO CUSTOMERS VALUES ('1234567', '9999');")
+        self.assertEqual(hits, [])
+
+
 class TestFalsePositives(unittest.TestCase):
     def test_no_matches(self):
         hits, name_candidates = scan("06_false_positives.sql")

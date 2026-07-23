@@ -4,6 +4,18 @@ search_condition, produced by statement_driver.py's tiered resync loop)
 and emits (column, operator, value, line) tuples for each
 sensitive-column comparison detection finding.
 
+Three grammar shapes are visited, each independently, since none of them
+share a common parent rule a single hook could cover: visitPredicate
+(WHERE/ON/HAVING-style comparisons: =, <>, IN, BETWEEN, LIKE, ...),
+visitAssignment_item (UPDATE ... SET col = 'literal' -- an assignment, not
+a comparison), and visitInsert_statement (INSERT INTO t (col, ...) VALUES
+('literal', ...) -- a value bound to its column by position in an
+explicit column list, not by any operator at all). A literal that never
+appears in one of these three shapes -- a bare SELECT-list literal, a
+function argument, an ORDER BY/GROUP BY item -- produces no finding,
+by design: none of those tie a literal to a specific column at all, so
+there's nothing to compare against --sensitive-columns.
+
 Grammar notes (see docs/PROVENANCE.md):
 
 - All of =, <>, <, >, <=, >=, IN, BETWEEN, LIKE are alternatives of a
@@ -118,6 +130,25 @@ def as_literal(ctx: Any) -> tuple[str, tuple[int, int]] | None:
     return const_ctx.getText(), (const_ctx.start.start, const_ctx.stop.stop)
 
 
+def _values_item_expressions(ctx: Any) -> list[Any]:
+    """Returns one Values_itemContext's own value(s) as a list of
+    ExpressionContext-or-None, in source order -- None for a NULL/DEFAULT
+    slot (expr_null_default's other two alternatives, neither of which is
+    ever a literal). Handles both shapes a plain literal VALUES row can
+    take: a single bare value (`expr_null_default`, a one-column INSERT
+    with no parens) or a parenthesized comma list (`expr_null_default_list`,
+    the ordinary `('a', 'b', 'c')` shape). `row_expression` (a
+    subquery-sourced row) is deliberately left out -- nothing under it is
+    ever a hardcoded literal by definition."""
+    single = ctx.expr_null_default()
+    if single is not None:
+        return [single.expression()]
+    list_ctx = ctx.expr_null_default_list()
+    if list_ctx is not None:
+        return [e.expression() for e in list_ctx.expr_null_default()]
+    return []
+
+
 class ExtractorVisitor(Db2ParserVisitor):
 
     def __init__(self, columns: Iterable[str], sink: FindingSink) -> None:
@@ -204,3 +235,50 @@ class ExtractorVisitor(Db2ParserVisitor):
         if lit is not None:
             val, span = lit
             self._emit(col, operator, val, ctx.start, span)
+
+    def visitAssignment_item(self, ctx: Db2Parser.Assignment_itemContext) -> Any:
+        """UPDATE ... SET col = value -- a completely separate grammar rule
+        from `predicate` (assignment, not comparison), so visitPredicate
+        above never sees it. Only the single `column_name EQ
+        expr_null_default` shape is handled (the shape a plain
+        `SET SENSITIVE_COL = 'literal'` takes); the multi-column
+        `(a, b) = (1, 2)` / `(a, b) = (SELECT ...)` shapes
+        (column_name_list_paren / row_fullselect) are left alone -- no
+        established convention here for which of several target columns a
+        single subquery-sourced value belongs to, so it's safer not to
+        guess than to misattribute one column's value to another."""
+        col_ctx = ctx.column_name()
+        end_ctx = ctx.expr_null_default()
+        if col_ctx is not None and end_ctx is not None:
+            col_name = col_ctx.id_().getText().upper()
+            if col_name in self.columns:
+                lit = as_literal(end_ctx.expression())
+                if lit is not None:
+                    val, span = lit
+                    self._emit(col_name, "=", val, ctx.start, span)
+        return self.visitChildren(ctx)
+
+    def visitInsert_statement(self, ctx: Db2Parser.Insert_statementContext) -> Any:
+        """INSERT INTO t (COL_A, COL_B) VALUES ('x', 'y') -- another
+        grammar rule visitPredicate never sees: a value here is bound to
+        its column purely by position against the explicit column list,
+        not by any comparison. Only handled when that column list is
+        actually given: a schema-less `INSERT INTO t VALUES (...)` (no
+        column list) would need the target table's real DDL column order
+        to know which value lands in which column, which this tool has no
+        access to -- see README's Known Limitations. Multi-row
+        `VALUES (...), (...), ...` is handled -- each row is checked
+        against the same column list independently."""
+        col_list_ctx = ctx.column_name_list()
+        if col_list_ctx is None:
+            return self.visitChildren(ctx)
+        col_names = [c.id_().getText().upper() for c in col_list_ctx.column_name()]
+        for values_item_ctx in ctx.values_item():
+            for col_name, expr_ctx in zip(col_names, _values_item_expressions(values_item_ctx)):
+                if col_name not in self.columns or expr_ctx is None:
+                    continue
+                lit = as_literal(expr_ctx)
+                if lit is not None:
+                    val, span = lit
+                    self._emit(col_name, "=", val, ctx.start, span)
+        return self.visitChildren(ctx)

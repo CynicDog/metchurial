@@ -19,6 +19,7 @@ that same parse tree, as specific analyses layered on top of it.
 | **Metadata extraction** — every table/column/function/predicate reference, JOIN relationships aggregated across the whole scan | `--extract-metadata` | [What it extracts](#what-it-extracts) |
 | **Sensitive-value detection** — sensitive-column comparisons and known-name literals | *(default, always on)* | [What it detects](#what-it-detects) |
 | **File splitting** — one file per standalone SELECT block | `--split-selects` | [Output artifacts](#output-artifacts) |
+| **Un-split** — best-effort revert of a previous `--split-selects` run, from `split_manifest.tsv` | `--un-split-selects` | [CLI reference](#cli-reference) |
 | **Literal masking** — rewrite flagged literals to fixed placeholders in place | `--mask-literals` | [Output artifacts](#output-artifacts) |
 | **Quarantine** — move every non-matching-extension file out of the scan root before scanning (never opened, let alone parsed — contrast with [Bad files](#bad-files)) | `--quarantine` | [Output artifacts](#output-artifacts) |
 
@@ -174,6 +175,7 @@ literals are sensitive or which unparseable files are safe to ignore.
 | `--extract-metadata` | off | Also emit `refs_tables.tsv`/`refs_columns.tsv`/`refs_functions.tsv`/`refs_relations.tsv`/`refs_query_identity.tsv` (schema/table/column refs, JOIN relationships, function/predicate usage, per-statement structural identity) and matching summary.md sections — see [Output artifacts](#output-artifacts) |
 | `--query-similarity` | off | Also emit `refs_query_similarity.tsv`: pairwise Jaccard similarity between statements that don't share a `core_id`. Opt-in because the pass is O(n²) in the number of *distinct* core_ids — fine for thousands of distinct queries, slow for tens of thousands. Requires `--extract-metadata` |
 | `--split-selects` | off | For a file with 2+ standalone SELECT blocks, write one `<stem>-NN<ext>` file per block alongside the original, then delete the original and record the mapping in `split_manifest.tsv` (files with a single block are left as-is). Only safe to run against a tree you already have a separate copy of |
+| `--un-split-selects` | off | Before scanning, reverts a previous `--split-selects` run using `split_manifest.tsv`: for each `original_file` it records, if every one of its split files is still present and `original_file` hasn't been recreated since, concatenates the split files' *current* content back together (block order) into `original_file` and deletes the split files. Best-effort, not a byte-for-byte undo — the original inter-statement whitespace was already discarded at split time. A group missing a split file, an incomplete group, or one whose `original_file` already exists again is left alone and stays in `split_manifest.tsv`. Mutually exclusive with `--split-selects` |
 | `--mask-literals` | off | Rewrite in place every flagged literal's content to a fixed placeholder (`'****'`/`"****"` for quoted, `0000` for unquoted numeric), everything else byte-for-byte identical — back up files first, this overwrites them |
 | `--workers N` | `1` | Scan across N worker processes instead of one |
 | `--max-chunk-iterations N` | `200000` | Safety-valve cap on the resync driver's loop iterations per statement chunk |
@@ -228,7 +230,20 @@ own finding:
   (see `--sensitive-columns`) compared to a hardcoded literal — `=`, `<>`,
   `!=`, `<=`, `>=`, `<`, `>`, `(NOT) IN (...)`, `(NOT) LIKE`,
   `BETWEEN ... AND ...`, or a bare `(` before a literal (a DB2 quirk) — in
-  either direction and regardless of spacing or line breaks.
+  either direction and regardless of spacing or line breaks. Also covers
+  the two non-comparison shapes a sensitive column's literal commonly
+  takes outside a WHERE/ON/HAVING clause: `UPDATE ... SET SENSITIVE_COL =
+  'literal'` (an assignment, not a comparison — its own grammar rule,
+  visited independently) and `INSERT INTO t (SENSITIVE_COL, ...) VALUES
+  ('literal', ...)` (bound to its column by position against an *explicit*
+  column list — a schema-less `INSERT INTO t VALUES (...)` with no column
+  list is never guessed at, since there's no DDL here to know the real
+  column order). **Known gap:** the vendored grammar currently can't parse
+  the explicit-column-list `INSERT` shape at all (`no viable alternative`,
+  even though `INSERT INTO t VALUES (...)` with no column list parses
+  fine) — see `tests/test_scan.py`'s `TestInsertValuesDetection` for the
+  reproduction; until that's worked around, a sensitive literal in that
+  specific shape produces no finding.
 - **Known-Name Matching — FINDING**: any quoted, name-shaped literal (2-4
   Hangul syllables) whose text is listed in `known_names.txt`, regardless
   of which column it's compared to. There's no surname heuristic — a
@@ -280,7 +295,7 @@ not a duplicate of it.
 | `refs_relations.tsv` | `--extract-metadata` | Every table-to-table JOIN edge found, one row per occurrence, with join type/predicate/file/line. The cross-file table-pair rollup (grouped by table_a/table_b with a join count) is summary.md's own "## Relations" section, not this file |
 | `refs_query_identity.tsv` | `--extract-metadata` | One `core_id` per statement — structurally identical statements share one id regardless of aliasing/projection/formatting differences |
 | `refs_query_similarity.tsv` | `--query-similarity` | Pairwise Jaccard similarity between distinct `core_id`s that don't match exactly |
-| `split_manifest.tsv` | `--split-selects` | One row per split file actually written: `original_file`, `split_file`, `block_number`, `total_blocks` -- the record of which now-deleted original each split file came from |
+| `split_manifest.tsv` | `--split-selects` | One row per split file actually written: `original_file`, `split_file`, `block_number`, `total_blocks` -- the record of which now-deleted original each split file came from. `--un-split-selects` reads this same file to revert, then rewrites it keeping only the rows it couldn't revert |
 | `quarantine_manifest.tsv` | `--quarantine` | One row per file moved out of the scan root: `original_file`, `quarantined_file` |
 
 ## Bad files

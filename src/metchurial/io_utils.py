@@ -11,6 +11,7 @@ import sys
 from typing import Callable
 
 from metchurial.models.bad_file import BadFileReason
+from metchurial.models.split import SplitManifestRow
 from metchurial.tsv import _clean
 
 # Encodings to try when reading files (common on Windows / Korean environments).
@@ -97,6 +98,43 @@ def write_bad_files(path: str, entries: dict[str, BadFileReason]) -> None:
             reason = entries[p]
             f.write("\t".join(_clean(v) for v in
                               (p, reason.category, reason.item, reason.message)) + "\n")
+
+
+def load_split_manifest(path: str) -> list[SplitManifestRow]:
+    """Load a previous run's split_manifest.tsv (--split-selects) for
+    --un-split-selects to revert: one row per split file -- original_file,
+    split_file, block_number, total_blocks, tab-separated, fixed header
+    row first (same conventions as write_refs_tsv). Returns [] for a
+    missing file -- unlike load_stopwords/load_known_names, a missing
+    manifest here just means nothing to revert, not a misconfiguration."""
+    rows: list[SplitManifestRow] = []
+    if not path or not os.path.isfile(path):
+        return rows
+
+    seen_header = False
+
+    def add_row(line: str) -> None:
+        nonlocal seen_header
+        line = line.rstrip("\r\n")
+        if not line:
+            return
+        if not seen_header:
+            seen_header = True
+            return
+        parts = line.split("\t")
+        if len(parts) < 4:
+            return
+        try:
+            block_number = int(parts[2])
+            total_blocks = int(parts[3])
+        except ValueError:
+            return
+        rows.append(SplitManifestRow(
+            original_file=parts[0], split_file=parts[1],
+            block_number=block_number, total_blocks=total_blocks))
+
+    _for_each_line(path, add_row)
+    return rows
 
 
 def ensure_stopwords_template(path: str) -> None:
