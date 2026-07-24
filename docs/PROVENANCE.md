@@ -102,6 +102,27 @@ restricted environment.
 
   `tests/test_query_identity_complex.py` pins these end-to-end through
   the scan pipeline.
+
+  A fourth round of modifications fixed a lexer-only gap surfaced by a
+  real false-positive report: `Db2Lexer.g4`'s `ID` token was ASCII-only
+  (`[A-Z_] [A-Z0-9_]*`), so a bare (unquoted, no `AS`) Korean-language
+  column alias -- a common pattern in real DB2 exports -- didn't fail to
+  *parse*, it failed to *lex*: every Hangul character became its own
+  lexer error, which was enough to trip the scan pipeline's own
+  lexer-error-ratio heuristic (`bad_file_check.py`'s
+  `LEXER_ERROR_RATIO_THRESHOLD`) and route otherwise-valid SQL straight
+  to `_quarantine/bad_files/` without ever being scanned. `ID` was
+  extended to also accept the Hangul Jamo, compat Jamo, and syllable
+  ranges, so a token like `가나다` now lexes exactly like an ASCII
+  identifier. `tests/fixtures/39_bare_korean_alias_no_as.sql`
+  (anonymized from the real report) and `tests/test_scan.py`'s
+  `TestBareKoreanAliasWithoutAs` pin this down end-to-end; two
+  `tests/test_bad_file_check.py` cases that had assumed bare Hangul
+  prose always lexer-errors were updated to use symbol-heavy content
+  instead, since that assumption no longer holds by design -- a
+  glued-together run of plain ASCII prose was never distinguishable
+  from one long identifier either, so this just brings Hangul to parity
+  with how ASCII already worked.
 - **Why this grammar over the previously-used Oracle PL/SQL grammar**:
   this project originally used `sql/plsql` (Oracle's grammar) as a
   stand-in, on the mistaken belief that no maintained DB2 grammar existed
