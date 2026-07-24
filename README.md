@@ -85,10 +85,16 @@ tooling required for that (those are dev-only, for regenerating
 ### Installing from PyPI
 
 ```bash
-pip install metchurial    # or: uv add metchurial
+pip install metchurial
 ```
 
-This installs the `metchurial` CLI and the library API below. The
+### Installing with uv
+
+```bash
+uv add metchurial
+```
+
+Either installs the `metchurial` CLI and the library API below. The
 single-file `dist/metchurial.py` remains the distribution channel for
 restricted environments where even `pip install` isn't an option.
 
