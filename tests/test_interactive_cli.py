@@ -12,6 +12,7 @@ import builtins
 import contextlib
 import io
 import os
+import shlex
 import shutil
 import sys
 import tempfile
@@ -182,7 +183,7 @@ class TestCliMainEntersWizardOnEmptyArgv(unittest.TestCase):
         self.assertTrue(os.path.isfile("summary.md"))
         with open("summary.md", encoding="utf-8-sig") as f:
             summary = f.read()
-        self.assertIn("metchurial {}".format(self.sql_root), summary)
+        self.assertIn("metchurial {}".format(shlex.quote(self.sql_root)), summary)
 
     def test_eof_during_wizard_exits_cleanly_not_with_a_traceback(self):
         builtins.input = _ScriptedInput([])  # exhausted immediately -> EOFError
