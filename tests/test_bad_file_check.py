@@ -122,7 +122,7 @@ class TestBadFileReasonStructuredFields(unittest.TestCase):
         self.assertTrue(reason.item.startswith("===="))
 
     def test_lexer_error_ratio_reports_category_and_offending_text(self):
-        sql = "이것은실제SQL이아닌설명입니다전혀다른내용입니다\nSELECT 1 FROM T1;"
+        sql = "◆◇■□●○▲△▶▷ 본 파일은 예시용 문서입니다 ◆◇■□●○▲△▶▷\nSELECT 1 FROM T1;\n"
         reason = _check_reason(sql)
         self.assertIsNotNone(reason)
         self.assertEqual(reason.category, "lexer-error-ratio")
@@ -133,7 +133,14 @@ class TestBadFileReasonStructuredFields(unittest.TestCase):
 
 class TestLexerErrorRatio(unittest.TestCase):
     def test_prose_heavy_file_is_flagged(self):
-        sql = "이것은실제SQL이아닌설명입니다전혀다른내용입니다\nSELECT 1 FROM T1;"
+        # Decorative symbol characters (not letters, not Hangul, not a
+        # defined SQL operator/punctuation token) are the thing the lexer
+        # still can't tokenize at all -- unlike a glued-together run of
+        # plain Hangul/ASCII words, which is lexically indistinguishable
+        # from one long identifier (see Db2Lexer.g4's ID rule) and always
+        # was, in either script -- so a *symbol*-heavy header is what
+        # actually still exercises this ratio check.
+        sql = "◆◇■□●○▲△▶▷ 본 파일은 예시용 문서입니다 ◆◇■□●○▲△▶▷\nSELECT 1 FROM T1;\n"
         self.assertIsNotNone(_check(sql))
 
     def test_legitimate_korean_aliases_are_not_flagged(self):

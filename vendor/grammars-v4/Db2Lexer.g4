@@ -904,7 +904,16 @@ LINE_COMMENT                        : '--' ~[\r\n]*                 -> channel(H
 
 DOUBLE_QUOTE_ID                     : '"' ~'"'+ '"';
 SINGLE_QUOTE                        : '\'';
-ID                                  : [A-Z_] [A-Z0-9_]*;
+// Hangul ranges (Jamo, compat Jamo, syllables) let bare/unquoted Korean
+// identifiers -- e.g. a `column 별칭` alias with no AS, common in
+// hand-exported DB2 SQL -- lex as one ID token instead of failing
+// character-by-character (each failure being its own lexer error, which
+// used to blow past bad_file_check.py's LEXER_ERROR_RATIO_THRESHOLD and
+// send otherwise-valid SQL to _quarantine/bad_files/). Standard SQL
+// unquoted identifiers are ASCII-only, but real DB2 exports in the wild
+// routinely carry raw Korean aliases anyway, so the grammar has to accept
+// what's actually on disk, not just what the spec allows.
+ID                                  : [A-Z_ᄀ-ᇿ㄰-㆏가-힣] [A-Z0-9_ᄀ-ᇿ㄰-㆏가-힣]*;
 
 STRING_LITERAL                      : '\'' (~'\'' | '\'\'')* '\'';
 DECIMAL_LITERAL                     : DEC_DIGIT+;

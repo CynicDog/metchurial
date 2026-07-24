@@ -1,4 +1,4 @@
-# Generated from /Users/eunsang/Documents/Sources/metchurial/vendor/grammars-v4/Db2Parser.g4 by ANTLR 4.13.2
+# Generated from /Users/ginsenglee/Documents/Sources/metchurial/vendor/grammars-v4/Db2Parser.g4 by ANTLR 4.13.2
 from antlr4 import *
 if "." in __name__:
     from .Db2Parser import Db2Parser

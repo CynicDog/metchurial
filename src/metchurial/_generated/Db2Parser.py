@@ -1,4 +1,4 @@
-# Generated from /Users/eunsang/Documents/Sources/metchurial/vendor/grammars-v4/Db2Parser.g4 by ANTLR 4.13.2
+# Generated from /Users/ginsenglee/Documents/Sources/metchurial/vendor/grammars-v4/Db2Parser.g4 by ANTLR 4.13.2
 # encoding: utf-8
 from antlr4 import *
 from io import StringIO
