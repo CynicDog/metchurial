@@ -3,22 +3,25 @@
 `--extract-metadata` assigns every SQL statement a `core_id`: a short,
 deterministic hash of that statement's structural signature. Statements
 that are the same underlying query — differing only in things like
-aliasing, which columns get selected, how a derived column is calculated,
-**or their `WHERE`/`GROUP BY` clauses** — collapse onto the same
-`core_id`. Statements that touch different tables, or join them
-differently, get different ones. That `WHERE`/`GROUP BY` exclusion is
-deliberate and load-bearing (see "Condensed grouping" below) — `core_id`
-is hashed from only four of the six fact categories a statement is
-reduced to; predicates and grouping are dropped on purpose, not an
-oversight.
+aliasing, which columns get selected, or how a derived column is
+calculated — collapse onto the same `core_id`. Statements that touch
+different tables, or join them differently, get different ones.
+
+Whether `WHERE`/`GROUP BY` clauses also discriminate identity is
+configurable via `--identity-granularity` (four tiers, see "Condensed
+grouping" below) — `core_id` is hashed from a *subset* of the six fact
+categories a statement is reduced to, and which subset is a per-run
+choice, not a fixed rule. The default tier (`structure`) excludes
+predicates and grouping, reproducing this feature's original behavior
+before granularity became configurable.
 
 This document covers *why* `core_id` exists, exactly what it hashes, and
 a worked example — an illustrative query run through the actual
-implementation, with its real computed `core_id` values — showing how a
-change to a query's SQL does or doesn't move its `core_id`. See
-[query-similarity.md](query-similarity.md) for the companion feature that
-scores statements which *don't* share a `core_id` against each other, and
-the last section below for how the two relate.
+implementation, with its real computed `core_id` values at the default
+`structure` tier — showing how a change to a query's SQL does or doesn't
+move its `core_id`. See [query-similarity.md](query-similarity.md) for the
+companion feature that scores statements which *don't* share a `core_id`
+against each other, and the last section below for how the two relate.
 
 ## Purpose
 
@@ -42,11 +45,12 @@ strict (see "Condensed grouping" below).
 ## The full fact set
 
 Every statement is reduced to a set of canonical fact strings — the
-*full* fact set — with six categories. **Not all six feed into `core_id`
-itself** — this table is the complete vocabulary a statement is reduced
-to; the next section ("Condensed grouping") narrows it down to the four
-categories `core_id` actually hashes, dropping `PRED`/`GROUPBY` on
-purpose:
+*full* fact set — with six categories. **Not all six necessarily feed
+into `core_id`** — this table is the complete vocabulary a statement is
+reduced to; the next section ("Condensed grouping") narrows it down to
+whichever categories the chosen `--identity-granularity` tier includes
+(four are always in; `PRED`/`GROUPBY` only join in at the stricter
+tiers):
 
 | Prefix | Example | Meaning |
 |---|---|---|
@@ -71,8 +75,17 @@ it wraps just because it contributes no other fact of its own.
 ## Condensed grouping: what discriminates `core_id`
 
 `core_id` is **not** a hash of the full fact set above. It's a hash of a
-narrower subset that drops `PRED|` and `GROUPBY|` facts entirely — only
-`TBL`/`JOINTYPE`/`REL`/`SHAPE` discriminate identity:
+narrower subset selected by `--identity-granularity`, one of four tiers,
+loosest to strictest:
+
+| `--identity-granularity` | Fact categories included | Notes |
+|---|---|---|
+| `table` | `TBL` | Loosest — any two statements touching the same table *set* share a `core_id`, regardless of how (or whether) they join those tables |
+| `structure` (**default**) | `TBL`, `JOINTYPE`, `REL`, `SHAPE` | Original, still-default behavior — join topology/type and query shape all discriminate, filters/grouping don't |
+| `filtered` | `structure` + `PRED` | WHERE predicates now also discriminate |
+| `strict` | `filtered` + `GROUPBY` | Strictest — the full fact set; two statements share a `core_id` only if every fact matches |
+
+At the **default `structure` tier**:
 
 | Statement change | Changes `core_id`? | Why |
 |---|---|---|
@@ -81,30 +94,47 @@ narrower subset that drops `PRED|` and `GROUPBY|` facts entirely — only
 | Derived-column arithmetic changed | No | Only the columns referenced matter (as `columns`, reporting-only) |
 | Comma-join rewritten as ANSI `JOIN...ON` | No | Both resolve to the same `REL`/`JOINTYPE` facts |
 | FROM-clause join order permuted | No | Facts are sets, not sequences |
-| WHERE predicate added/changed/removed | **No** | `PRED\|` excluded on purpose — see below |
-| GROUP BY item added/changed/removed | **No** | `GROUPBY\|` excluded on purpose — see below |
-| HAVING / ORDER BY changed | No | Never contributes a fact at all |
-| A table added or removed | Yes | New/missing `TBL\|` fact |
-| Join type flipped (`LEFT`→`INNER`) | Yes | `JOINTYPE\|` multiset count shifts |
-| Join topology changed (different tables linked) | Yes | `REL\|` fact set changes |
-| Bare query vs. its own CTE/subquery/UNION wrapper | Yes | `SHAPE\|BLOCKS` differs |
+| WHERE predicate added/changed/removed | **No** | `PRED\|` excluded at this tier — included at `filtered`/`strict` |
+| GROUP BY item added/changed/removed | **No** | `GROUPBY\|` excluded at this tier — included at `strict` |
+| HAVING / ORDER BY changed | No | Never contributes a fact at all, at any tier |
+| A table added or removed | Yes | New/missing `TBL\|` fact — changes `core_id` at every tier, including `table` |
+| Join type flipped (`LEFT`→`INNER`) | Yes | `JOINTYPE\|` multiset count shifts — no effect at the `table` tier |
+| Join topology changed (different tables linked) | Yes | `REL\|` fact set changes — no effect at the `table` tier |
+| Bare query vs. its own CTE/subquery/UNION wrapper | Yes | `SHAPE\|BLOCKS` differs — no effect at the `table` tier |
 
-The point of identity here is to collapse a corpus of thousands of files
-down to a short list of *distinct core queries* — the same report re-run
-with a narrower `WHERE` filter, or grouped by one extra column, is still
-the same underlying query touching the same tables through the same
-joins. Splitting it into its own `core_id` just re-inflates the "distinct
-queries" list back toward the file count, defeating the point. Two
-statements sharing a `core_id` can therefore still differ in their
-filters/grouping — that's not lost information, it still lives in the
-full fact set (`IdentityRow.fact_set`), which `--query-similarity` scores
-over instead (see [query-similarity.md](query-similarity.md)) — it's just
-not what *identity* discriminates on.
+The point of identity is to collapse a corpus of thousands of files down
+to a short list of *distinct core queries*. At `structure`, the same
+report re-run with a narrower `WHERE` filter, or grouped by one extra
+column, is still the same underlying query touching the same tables
+through the same joins — splitting it into its own `core_id` just
+re-inflates the "distinct queries" list back toward the file count,
+defeating the point. `table` collapses further still (join topology stops
+mattering too) for a coarser "which tables does this codebase actually
+touch, together" pass; `filtered`/`strict` go the other way for callers
+who want a stricter notion of "the same query" that also cares about which
+rows get selected or how they're grouped.
+
+Two statements sharing a `core_id` at a given tier can still differ in
+facts a stricter tier would have split them on — that's not lost
+information, it still lives in the full fact set (`IdentityRow.fact_set`),
+which `--query-similarity` scores over *regardless of granularity* (see
+[query-similarity.md](query-similarity.md)) — it's just not always what
+*identity* discriminates on. `--identity-granularity` requires
+`--extract-metadata` unless left at its default; passing a non-default
+value without it is a usage error, since it has nothing to affect.
+
+The five supplementary `IdentityRow` fields (`table_count`, `join_count`,
+`tables`, `join_types`, `relations`) are read from the **full** fact set,
+not the granularity-narrowed one, so they stay meaningful at every tier —
+at `table`, for instance, `join_count`/`join_types`/`relations` still
+report the statement's real joins even though joins don't discriminate its
+`core_id`.
 
 ## Algorithm
 
 1. Build the full fact set for a statement (`build_fact_set`).
-2. Narrow it to just `TBL`/`JOINTYPE`/`REL`/`SHAPE` facts (`_facts_for_core_id`).
+2. Narrow it to the categories the chosen `--identity-granularity` tier
+   includes (`_facts_for_granularity`).
 3. Sort the narrowed set, join with `\n`, SHA-256 it, and take the first
    16 hex characters (`core_id_for`) — deterministic and order-independent
    (a Python-native `hash()` would not be stable across processes, which
@@ -114,11 +144,11 @@ not what *identity* discriminates on.
 
 The base query below, and every variant of it in this section, are real
 SQL run through the actual implementation
-(`scan_file(..., ScanOptions(extract_query_identity=True))`) — the
-`core_id` values shown are genuine computed output, not invented. `ACCT`/
-`CTRT`/`STAT`/`SAMPLE` are placeholder table names (account/contract/
-status/sample-attribute); swap in your own schema mentally, the mechanics
-don't change.
+(`scan_file(..., ScanOptions(extract_query_identity=True))`, i.e. the
+default `structure` granularity tier) — the `core_id` values shown are
+genuine computed output, not invented. `ACCT`/`CTRT`/`STAT`/`SAMPLE` are
+placeholder table names (account/contract/status/sample-attribute); swap
+in your own schema mentally, the mechanics don't change.
 
 **Base query:**
 
@@ -205,9 +235,12 @@ Each identity row also carries fields that are useful for a human reading
   subquery, or a `UNION`/`INTERSECT`/`EXCEPT`. `SHAPE|BLOCKS` is what
   actually keeps a wrapper statement from collapsing onto the bare query
   it wraps; these three just surface that shape in the TSV.
-- `table_count` / `join_count` — counts derived from the narrowed,
-  identity-relevant fact set, for a quick read of a cluster's size/shape
-  without opening the full `fact_set`.
+- `table_count` / `join_count` — counts derived from the statement's
+  **full** fact set (not the granularity-narrowed one `core_id` hashes),
+  for a quick read of a cluster's size/shape without opening `fact_set`
+  itself. Deliberately independent of `--identity-granularity`, so they
+  stay accurate even at the `table` tier, where joins don't discriminate
+  `core_id` but still happened.
 
 ## Known limitations
 
@@ -231,10 +264,11 @@ underlying data, deliberately kept separate:
 
 - `core_id` groups statements into a **short list of distinct core
   queries** — a hard equivalence class, computed over a narrowed fact set
-  that excludes `PRED`/`GROUPBY` on purpose.
+  whose breadth is a per-run choice (`--identity-granularity`), not fixed.
 - `--query-similarity` scores statements that **don't** share a `core_id`
   against each other, over their **full** fact set (`PRED`/`GROUPBY`
-  included) — surfacing near-misses at a finer resolution than identity
+  included, regardless of which `--identity-granularity` tier the run
+  used) — surfacing near-misses at a finer resolution than identity
   does, without re-inflating the distinct-core-query count to do it.
 
 See [query-similarity.md](query-similarity.md) for that computation in

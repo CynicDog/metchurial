@@ -13,6 +13,10 @@ _quarantine/excluded/ before the scan starts, and moves every file the
 scan itself flags bad into _quarantine/bad_files/ once it's done -- see
 metchurial.quarantine's own module docstring for why both are
 unconditional rather than opt-in.
+
+Run with zero arguments (`metchurial`, no flags) to enter an interactive
+wizard instead of argparse's usual "the following arguments are required"
+error -- see metchurial.interactive.
 """
 
 from __future__ import annotations
@@ -22,6 +26,7 @@ import os
 import shlex
 import sys
 
+from metchurial import interactive as interactive_module
 from metchurial.references import query_identity as query_identity_module
 from metchurial.references import relations as relations_module
 from metchurial.io_utils import (ensure_known_names_template, ensure_stopwords_template, load_bad_files,
@@ -31,8 +36,9 @@ from metchurial.tsv import write_refs_tsv
 from metchurial.engine import scan_tree
 from metchurial import quarantine as quarantine_module
 from metchurial.split import unsplit as unsplit_module
-from metchurial.models.options import (DEFAULT_EXTENSIONS, DEFAULT_MAX_CHUNK_ITERATIONS,
-                                       DEFAULT_SENSITIVE_COLUMNS, ScanOptions)
+from metchurial.models.options import (DEFAULT_EXTENSIONS, DEFAULT_IDENTITY_GRANULARITY,
+                                       DEFAULT_MAX_CHUNK_ITERATIONS, DEFAULT_SENSITIVE_COLUMNS,
+                                       IDENTITY_GRANULARITIES, ScanOptions)
 
 # Plain 7-bit ASCII only (backslash/slash/underscore/equals/quote/hyphen/
 # space) -- deliberately no Unicode box-drawing or em-dashes here, so this
@@ -134,6 +140,16 @@ def main(argv: list[str] | None = None) -> None:
                         "projection/derived-column-calculation differences), "
                         "plus matching sections in summary.md (default: off; see README's "
                         "Known Limitations for the JOIN/CTE-related resolution gaps)")
+    ap.add_argument("--identity-granularity", choices=list(IDENTITY_GRANULARITIES),
+                    default=DEFAULT_IDENTITY_GRANULARITY,
+                    help="Which structural fact categories discriminate a statement's "
+                        "core_id, loosest to strictest: 'table' (table set only), "
+                        "'structure' (+ join types/relationships/query shape -- the "
+                        "original, still-default behavior), 'filtered' (+ WHERE predicates), "
+                        "'strict' (+ GROUP BY, i.e. the full fact set). A looser tier "
+                        "collapses more statements onto one core_id; a stricter one splits "
+                        "more of them apart. Requires --extract-metadata unless left at its "
+                        "default (default: %(default)s; see docs/query-identity.md)")
     ap.add_argument("--query-similarity", action="store_true",
                     help="Also emit refs_query_similarity.tsv: a pairwise Jaccard similarity "
                         "score between statements that don't share a core_id. Opt-in because "
@@ -169,11 +185,32 @@ def main(argv: list[str] | None = None) -> None:
                         "own quote character; '0000' for an unquoted numeric "
                         "literal), everything else byte-for-byte identical. A file "
                         "with no findings is left untouched (default: off)")
-    args = ap.parse_args(argv)
+    # A bare `metchurial` invocation (no argv at all) drops into the
+    # interactive wizard instead of argparse's usual "the following
+    # arguments are required: root" error -- raw_args is also what
+    # `invocation` below is built from, so summary.md's Command row shows
+    # the wizard-assembled command, not an empty one. A test passing an
+    # explicit empty list (`cli.main([])`) triggers the wizard too, by the
+    # same "zero arguments" rule a real no-arg shell invocation follows.
+    raw_args = argv if argv is not None else sys.argv[1:]
+    if not raw_args:
+        try:
+            raw_args = interactive_module.run_wizard()
+        except EOFError:
+            print("ERROR: no arguments given and interactive input is unavailable "
+                 "(stdin is closed/non-interactive). Pass flags directly instead, "
+                 "e.g. `metchurial <root> [options]` -- see --help.", file=sys.stderr)
+            sys.exit(2)
+
+    args = ap.parse_args(raw_args)
 
     if args.query_similarity and not args.extract_metadata:
         ap.error("--query-similarity requires --extract-metadata "
                  "(it scores the core_ids metadata extraction discovers)")
+
+    if args.identity_granularity != DEFAULT_IDENTITY_GRANULARITY and not args.extract_metadata:
+        ap.error("--identity-granularity requires --extract-metadata "
+                 "(it only affects how core_id is computed)")
 
     if args.un_split_selects and args.split_selects:
         ap.error("--un-split-selects and --split-selects are mutually exclusive "
@@ -261,7 +298,8 @@ def main(argv: list[str] | None = None) -> None:
         sensitive_columns=tuple(args.sensitive_columns), stopwords=stopwords,
         known_names=known_names, extensions=tuple(args.extensions),
         split_selects=args.split_selects, workers=args.workers,
-        max_chunk_iterations=args.max_chunk_iterations)
+        max_chunk_iterations=args.max_chunk_iterations,
+        identity_granularity=args.identity_granularity)
     options = (ScanOptions.metadata(**common) if args.extract_metadata
                else ScanOptions(**common))
 
@@ -326,13 +364,13 @@ def main(argv: list[str] | None = None) -> None:
     query_similarity_rows = (query_identity_module.compute_similarity(tree.identity_rows)
                              if args.query_similarity else None)
 
-    invocation = "metchurial " + " ".join(
-        shlex.quote(a) for a in (argv if argv is not None else sys.argv[1:]))
+    invocation = "metchurial " + " ".join(shlex.quote(a) for a in raw_args)
     run_info = {
         "invocation": invocation, "root": args.root, "file_count": tree.file_count,
         "sensitive_columns": args.sensitive_columns, "extensions": args.extensions,
         "workers": args.workers, "max_chunk_iterations": args.max_chunk_iterations,
         "extract_metadata": args.extract_metadata, "query_similarity": args.query_similarity,
+        "identity_granularity": args.identity_granularity,
         "split_selects": args.split_selects, "un_split_selects": args.un_split_selects,
         "mask_literals": args.mask_literals,
         "verbose": args.verbose,
@@ -410,9 +448,10 @@ def main(argv: list[str] | None = None) -> None:
         print("Column refs    : {}".format(os.path.abspath(REFS_COLUMNS_PATH)))
         print("Functions      : {}".format(os.path.abspath(FUNCTIONS_PATH)))
         print("Relations      : {}".format(os.path.abspath(RELATIONS_PATH)))
-        print("Query identity : {} ({} statement(s), {} distinct core_id(s))".format(
-            os.path.abspath(QUERY_IDENTITY_PATH), len(tree.identity_rows),
-            len({r.core_id for r in tree.identity_rows})))
+        print("Query identity : {} ({} statement(s), {} distinct core_id(s), "
+             "granularity={})".format(
+                 os.path.abspath(QUERY_IDENTITY_PATH), len(tree.identity_rows),
+                 len({r.core_id for r in tree.identity_rows}), args.identity_granularity))
     if args.query_similarity:
         print("Query similarity: {}".format(os.path.abspath(QUERY_SIMILARITY_PATH)))
     if args.split_selects:

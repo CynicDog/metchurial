@@ -35,14 +35,16 @@ threshold, along with a human-readable list of exactly which facts differ
 ## What it's computed over
 
 Similarity is scored over each distinct `core_id`'s **full** fact set —
-`IdentityRow.fact_set` — which is the same six categories `core_id` itself
-is built from (`TBL`/`JOINTYPE`/`REL`/`PRED`/`GROUPBY`/`SHAPE`; see
-[query-identity.md](query-identity.md#the-fact-set)), but *without*
-`core_id`'s own `PRED`/`GROUPBY` exclusion. This is deliberate: identity's
-whole point is to ignore filter/grouping differences so the corpus
-collapses to a short list; similarity's whole point is the opposite — to
-surface exactly those finer-grained differences once two statements have
-already failed to collapse into the same `core_id` on tables/joins alone.
+`IdentityRow.fact_set` — all six categories (`TBL`/`JOINTYPE`/`REL`/`PRED`/
+`GROUPBY`/`SHAPE`; see [query-identity.md](query-identity.md#the-fact-set)),
+**regardless of which `--identity-granularity` tier the run used for
+`core_id`** — even at the loosest `table` tier, similarity still scores
+over every category. This is deliberate: identity's whole point is to let
+a run choose how coarsely to collapse the corpus; similarity's whole
+point is the opposite — to surface finer-grained differences once two
+statements have already failed to collapse onto the same `core_id`, using
+the same full-detail comparison no matter how loose or strict that run's
+`core_id` tier was.
 
 One consequence worth being explicit about: **two statements that share a
 `core_id` are never scored against each other**, even though their full

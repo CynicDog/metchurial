@@ -171,12 +171,21 @@ literals are sensitive or which unparseable files are safe to ignore.
 
 ## CLI reference
 
+Running `metchurial` with no arguments at all launches an interactive
+wizard instead of argparse's usual "the following arguments are required"
+error — it prompts for every flag below in turn (blank answer = default),
+prints the equivalent command line once you're done answering, then runs
+that scan. Useful for a first run or occasional use; scripts/CI should
+keep passing flags directly, which skips the wizard entirely and behaves
+exactly as before.
+
 | Flag | Default | Description |
 |---|---|---|
 | `root` (positional) | — | Directory to scan recursively |
 | `--sensitive-columns` | `ACCT_ID CTRT_NO ACCT_NM ACCT_NAME` | Column names sensitive-column comparison detection treats as sensitive; fully replaces the default list, doesn't add to it |
 | `--extensions` | `sql txt` | File extensions to scan, without the dot. Same-directory files that reduce to the same name once backup-style extensions are stripped (`query1.sql` / `query1.sql.bak`, or a lone `query1.bak`) count as one file, not two — unless their content actually differs, in which case both are scanned |
 | `--extract-metadata` | off | Also emit `refs_tables.tsv`/`refs_columns.tsv`/`refs_functions.tsv`/`refs_relations.tsv`/`refs_query_identity.tsv` (schema/table/column refs, JOIN relationships, function/predicate usage, per-statement structural identity) and matching summary.md sections — see [Output artifacts](#output-artifacts) |
+| `--identity-granularity` | `structure` | Which structural fact categories discriminate a statement's `core_id`, loosest to strictest: `table` (table set only) → `structure` (+ join types/relationships/query shape — the original, still-default behavior) → `filtered` (+ WHERE predicates) → `strict` (+ GROUP BY, i.e. the full fact set). See [docs/query-identity.md](docs/query-identity.md). Requires `--extract-metadata` unless left at its default |
 | `--query-similarity` | off | Also emit `refs_query_similarity.tsv`: pairwise Jaccard similarity between statements that don't share a `core_id`. Opt-in because the pass is O(n²) in the number of *distinct* core_ids — fine for thousands of distinct queries, slow for tens of thousands. Requires `--extract-metadata` |
 | `--split-selects` | off | For a file with 2+ standalone SELECT blocks, write one `<stem>-NN<ext>` file per block alongside the original, then delete the original and record the mapping in `split_manifest.tsv` (files with a single block are left as-is). Only safe to run against a tree you already have a separate copy of |
 | `--un-split-selects` | off | Before scanning, reverts a previous `--split-selects` run using `split_manifest.tsv`: for each `original_file` it records, if every one of its split files is still present and `original_file` hasn't been recreated since, concatenates the split files' *current* content back together (block order) into `original_file` and deletes the split files. Best-effort, not a byte-for-byte undo — the original inter-statement whitespace was already discarded at split time. A group missing a split file, an incomplete group, or one whose `original_file` already exists again is left alone and stays in `split_manifest.tsv`. Mutually exclusive with `--split-selects` |

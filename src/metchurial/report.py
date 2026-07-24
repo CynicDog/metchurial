@@ -122,6 +122,7 @@ def _write_run_info(out: TextIO, run_info: dict[str, Any]) -> None:
     out.write("| Workers | {} |\n".format(run_info["workers"]))
     out.write("| Max chunk iterations | {} |\n".format(run_info["max_chunk_iterations"]))
     out.write("| Extract metadata | {} |\n".format("ON" if run_info["extract_metadata"] else "OFF"))
+    out.write("| Identity granularity | {} |\n".format(run_info["identity_granularity"]))
     out.write("| Query similarity | {} |\n".format("ON" if run_info["query_similarity"] else "OFF"))
     out.write("| Split selects | {} |\n".format("ON" if run_info["split_selects"] else "OFF"))
     out.write("| Un-split selects | {} |\n".format(
@@ -359,8 +360,8 @@ def write_markdown_report(path: str, run_info: dict[str, Any], tree: TreeScanRes
     at a similarity file that wasn't written.
     `run_info`: {invocation, root, file_count, sensitive_columns,
     extensions, workers, max_chunk_iterations, extract_metadata,
-    query_similarity, split_selects, un_split_selects, mask_literals,
-    verbose}."""
+    identity_granularity, query_similarity, split_selects, un_split_selects,
+    mask_literals, verbose}."""
     with open(path, "w", encoding="utf-8-sig") as out:
         _write_run_info(out, run_info)
         if extract_metadata:

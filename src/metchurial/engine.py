@@ -317,7 +317,9 @@ def _scan_file_body(path: str, text: str, enc: str, options: ScanOptions,
     # item -- both deliberately excluded from core_id, see
     # query_identity.py's module docstring -- still counts as meaningful.
     for blocks, predicate_visitor, line, tokens in query_identity_chunks:
-        row = query_identity.build_identity_row(blocks, predicate_visitor, path, line, tokens)
+        row = query_identity.build_identity_row(
+            blocks, predicate_visitor, path, line, tokens,
+            granularity=options.identity_granularity)
         if len(row.fact_set) > 1:
             result.identity_rows.append(row)
 

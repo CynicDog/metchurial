@@ -29,25 +29,39 @@ statement) has six categories:
   though one is a CTE/subquery wrapper and the other is not.
 
 Condensed grouping -- core_id vs. the full fact set:
-    `core_id` is NOT a hash of the full fact set above. It's a hash of a
-    narrower subset that drops PRED| and GROUPBY| facts entirely (see
-    `_facts_for_core_id`) -- only TBL/JOINTYPE/REL/SHAPE discriminate
-    identity. The point of identity here is to collapse a corpus of
-    thousands of files down to a short list of *distinct core queries* --
-    the same report re-run with a narrower WHERE filter, or grouped by
-    one extra column, is still the same underlying query touching the
-    same tables through the same joins, and splitting it into its own
-    core_id just re-inflates the "distinct queries" list back toward the
-    file count, defeating the point. Two statements sharing a core_id can
-    therefore still differ in their filters/grouping -- that's not lost
-    information, it still lives in the full fact set (`IdentityRow.
-    fact_set`), which `--query-similarity` scores over (see below) --
-    it's just not what *identity* discriminates on.
+    `core_id` is NOT (necessarily) a hash of the full fact set above. It's a
+    hash of a narrower subset selected by `--identity-granularity` (see
+    `_facts_for_granularity` / `_GRANULARITY_PREFIXES`), one of four tiers,
+    loosest to strictest:
 
-    Statements that differ only in SELECT-list projection, column
-    aliasing, derived-column arithmetic, table aliases, formatting,
-    comments, literal values, ORDER BY, HAVING, WHERE filters, or
-    grouping share a core_id; statements that differ in tables, join
+    * ``table``      -- TBL only
+    * ``structure``  -- TBL, JOINTYPE, REL, SHAPE (the default -- this was
+      once the only option, and still reproduces that original hardcoded
+      behavior exactly)
+    * ``filtered``    -- structure + PRED
+    * ``strict``      -- filtered + GROUPBY (= the full fact set)
+
+    The point of identity here is to collapse a corpus of thousands of
+    files down to a short list of *distinct core queries* -- at the
+    `structure` default, the same report re-run with a narrower WHERE
+    filter, or grouped by one extra column, is still the same underlying
+    query touching the same tables through the same joins, and splitting
+    it into its own core_id just re-inflates the "distinct queries" list
+    back toward the file count, defeating the point. A looser tier
+    (`table`) collapses further -- even a join-topology change stops
+    mattering; a stricter tier (`filtered`/`strict`) re-introduces WHERE/
+    GROUP BY as discriminators for callers doing finer-grained duplicate
+    detection instead of a coarse query-count audit. Two statements
+    sharing a core_id at a looser tier can still differ in facts a
+    stricter tier would have split them on -- that's not lost information,
+    it still lives in the full fact set (`IdentityRow.fact_set`), which
+    `--query-similarity` scores over regardless of granularity (see
+    below) -- it's just not always what *identity* discriminates on.
+
+    At the `structure` default: statements that differ only in SELECT-list
+    projection, column aliasing, derived-column arithmetic, table aliases,
+    formatting, comments, literal values, ORDER BY, HAVING, WHERE filters,
+    or grouping share a core_id; statements that differ in tables, join
     topology, or join types do not. All facts come from the parse tree
     and the token-scan (table_scan.py) with aliases resolved to real
     table names -- never from normalizing SQL text.
@@ -101,6 +115,7 @@ from metchurial._generated.Db2Parser import Db2Parser
 from metchurial._generated.Db2ParserVisitor import Db2ParserVisitor
 
 from metchurial.models.identity import IdentityRow, SimilarityPair
+from metchurial.models.options import DEFAULT_IDENTITY_GRANULARITY
 from metchurial.models.tables import QueryBlock
 from metchurial.parsing.predicates import COMPARISON_OPS, classify_predicate, subject_expression
 from metchurial.references import table_scan
@@ -340,27 +355,35 @@ def build_fact_set(query_blocks: list[QueryBlock],
     return frozenset(facts)
 
 
-# Fact-string prefixes excluded from core_id -- see this module's
-# docstring, "Condensed grouping". Still present in the full fact_set
-# every IdentityRow carries (and that compute_similarity scores over);
-# just not part of what core_id_for hashes.
-_EXCLUDED_FROM_CORE_ID = ("PRED|", "GROUPBY|")
+# Fact-string prefixes each --identity-granularity tier includes, loosest
+# to strictest -- see this module's docstring, "Condensed grouping". Every
+# tier's facts still live in the full fact_set every IdentityRow carries
+# (and that compute_similarity always scores over, regardless of the tier
+# chosen); this only controls what core_id_for hashes.
+_GRANULARITY_PREFIXES = {
+    "table": ("TBL|",),
+    "structure": ("TBL|", "JOINTYPE|", "REL|", "SHAPE|"),
+    "filtered": ("TBL|", "JOINTYPE|", "REL|", "SHAPE|", "PRED|"),
+    "strict": ("TBL|", "JOINTYPE|", "REL|", "SHAPE|", "PRED|", "GROUPBY|"),
+}
 
 
-def _facts_for_core_id(fact_set: frozenset[str]) -> frozenset[str]:
+def _facts_for_granularity(fact_set: frozenset[str], granularity: str) -> frozenset[str]:
     """The subset of a statement's full fact set that actually
-    discriminates its core_id -- TBL/JOINTYPE/REL/SHAPE only. Two
-    statements whose *only* difference is a WHERE predicate or a GROUP BY
-    item hash identically once passed through this filter, so they land
-    on the same core_id even though their full fact_sets (and thus their
-    Jaccard similarity against a third statement) still differ."""
-    return frozenset(f for f in fact_set if not f.startswith(_EXCLUDED_FROM_CORE_ID))
+    discriminates its core_id at the given --identity-granularity tier.
+    Two statements whose only difference is a fact category excluded at
+    that tier (e.g. a WHERE predicate at `structure`) hash identically
+    once passed through this filter, so they land on the same core_id even
+    though their full fact_sets (and thus their Jaccard similarity against
+    a third statement) still differ."""
+    prefixes = _GRANULARITY_PREFIXES[granularity]
+    return frozenset(f for f in fact_set if f.startswith(prefixes))
 
 
 def core_id_for(fact_set: frozenset[str]) -> str:
     """Deterministic short hex id -- order-independent (fact_set is
     hashed via a sorted, joined repr, not Python's own unstable hash()).
-    Callers pass the *narrowed* fact set (_facts_for_core_id's output),
+    Callers pass the *narrowed* fact set (_facts_for_granularity's output),
     not a statement's full fact_set -- build_identity_row is the only
     caller and does this for you."""
     canonical = "\n".join(sorted(fact_set))
@@ -412,16 +435,26 @@ def _humanize_fact(fact: str) -> str:
 
 
 def build_identity_row(query_blocks: list[QueryBlock], predicate_visitor: _PredicateFactVisitor,
-                       path: str, line: int | None, tokens: list[Any]) -> IdentityRow:
+                       path: str, line: int | None, tokens: list[Any],
+                       granularity: str = DEFAULT_IDENTITY_GRANULARITY) -> IdentityRow:
     """predicate_visitor: a _PredicateFactVisitor that has already visited
     every committed fragment of this chunk. Its `columns` set, its
     `has_subquery` flag, and the per-category fact breakouts below
     (`tables`/`join_types`/`relations`), ride along as supplementary
-    information only -- human-readable views of the *identity-relevant*
-    facts for the TSV, never re-derived into the core_id. `fact_set`
-    itself carries every fact (including PRED/GROUPBY, deliberately
-    excluded from core_id -- see this module's docstring) for
+    information only -- human-readable views of the TBL/JOINTYPE/REL facts
+    for the TSV, deliberately read from the *full* fact_set rather than the
+    granularity-narrowed one, so they stay meaningful regardless of
+    `granularity` (at the loosest `table` tier, `identity_facts` below
+    carries no JOINTYPE/REL facts at all -- these fields would silently
+    read as empty/zero if they were sourced from it instead). `fact_set`
+    itself carries every fact (including PRED/GROUPBY, excluded from
+    core_id at some or all tiers -- see this module's docstring) for
     compute_similarity to score over.
+
+    `granularity`: one of IDENTITY_GRANULARITIES (models/options.py) --
+    which fact categories discriminate `core_id` for this statement. Never
+    affects `fact_set`, `columns`, `has_cte`/`has_subquery`/`has_union`, or
+    the tables/join_types/relations breakouts -- only `core_id` itself.
 
     `tokens`: this chunk's own token slice (same one scan_query_blocks(tokens)
     was built from) -- `has_cte`/`has_union` are read straight off it via
@@ -430,19 +463,19 @@ def build_identity_row(query_blocks: list[QueryBlock], predicate_visitor: _Predi
     as one clean tree (see _PredicateFactVisitor.has_subquery's own
     docstring for why that's not equally true of `has_subquery`)."""
     fact_set = build_fact_set(query_blocks, predicate_visitor.facts)
-    identity_facts = _facts_for_core_id(fact_set)
+    identity_facts = _facts_for_granularity(fact_set, granularity)
     return IdentityRow(
         core_id=core_id_for(identity_facts), file=path, line=line,
-        table_count=sum(1 for f in identity_facts if f.startswith("TBL|")),
-        join_count=sum(1 for f in identity_facts if f.startswith("REL|")),
+        table_count=sum(1 for f in fact_set if f.startswith("TBL|")),
+        join_count=sum(1 for f in fact_set if f.startswith("REL|")),
         has_cte=bool(table_scan.find_cte_names(tokens)),
         has_subquery=predicate_visitor.has_subquery,
         has_union=table_scan.has_set_operator(tokens),
         fact_set=fact_set,
         columns=tuple(sorted(predicate_visitor.columns)),
-        tables=tuple(f.replace("|", ".") for f in _facts_by_prefix(identity_facts, "TBL|")),
-        join_types=tuple(_facts_by_prefix(identity_facts, "JOINTYPE|")),
-        relations=tuple(_reformat_rel(f) for f in _facts_by_prefix(identity_facts, "REL|")),
+        tables=tuple(f.replace("|", ".") for f in _facts_by_prefix(fact_set, "TBL|")),
+        join_types=tuple(_facts_by_prefix(fact_set, "JOINTYPE|")),
+        relations=tuple(_reformat_rel(f) for f in _facts_by_prefix(fact_set, "REL|")),
     )
 
 

@@ -27,6 +27,13 @@ DEFAULT_EXTENSIONS = ("sql", "txt")
 # parsing/statement_driver.py, which owns the mechanism this bounds).
 DEFAULT_MAX_CHUNK_ITERATIONS = 200000
 
+# core_id granularity tiers (--identity-granularity), loosest to strictest --
+# see references/query_identity.py's module docstring ("Condensed grouping")
+# for exactly which fact categories each tier includes. "structure" is the
+# default and reproduces core_id's original hardcoded behavior exactly.
+IDENTITY_GRANULARITIES = ("table", "structure", "filtered", "strict")
+DEFAULT_IDENTITY_GRANULARITY = "structure"
+
 
 def extension_suffixes(extensions: tuple[str, ...]) -> tuple[str, ...]:
     """Normalizes `extensions` (as passed to --extensions/ScanOptions) into
@@ -58,6 +65,7 @@ class ScanOptions:
     extract_relations: bool = False
     extract_functions: bool = False
     extract_query_identity: bool = False
+    identity_granularity: str = DEFAULT_IDENTITY_GRANULARITY
     split_selects: bool = False
     workers: int = 1
     max_chunk_iterations: int = DEFAULT_MAX_CHUNK_ITERATIONS
