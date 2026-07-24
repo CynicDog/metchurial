@@ -464,7 +464,11 @@ class TestTxtExtension(unittest.TestCase):
 class TestMaskingEndToEnd(unittest.TestCase):
     """Stress test for --mask-literals against a fixture combining several
     finding shapes at once (plain/double-quoted finding, IN-list, BETWEEN,
-    reversed comparison, bare-paren quirk, nested-paren IN item, single-
+    reversed comparison, bare-paren quirk, nested-paren IN item, a
+    double-quoted literal inside NOT IN (regression: the Tier 3 token-scan
+    fallback used to bail on the NOT+IN two-token compound operator,
+    mistaking it for a second unrelated comparison -- see
+    supplementary_checks.py's _NOT_COMPOUND_FOLLOWERS), single-
     and double-quoted known-name findings, a finding inside a comment) -- see
     tests/fixtures/16_masking_end_to_end.sql. Individual constructs already
     have their own dedicated tests elsewhere; this one exercises the full
@@ -491,7 +495,7 @@ class TestMaskingEndToEnd(unittest.TestCase):
         result = scanner.scan_file(
             self.path, ScanOptions(known_names=self.KNOWN_NAMES))
         hits = result.findings
-        self.assertEqual(len(hits), 15)
+        self.assertEqual(len(hits), 16)
         self.assertEqual(result.name_candidates, [])
 
         written = mask.write_masked_files(hits)
@@ -511,6 +515,7 @@ class TestMaskingEndToEnd(unittest.TestCase):
                 .replace("0000003", "").replace("0000004", "").replace("0000005", "")
                 .replace("0000010", "").replace("0000020", "").replace("0000123", "")
                 .replace("0000030", "").replace("0000040", "").replace("0000041", "")
+                .replace("0000060", "")
                 .replace("0000099", "").replace("0000050", "")
                 .replace("홍길동", "").replace("강남구", ""),
             masked_text.replace("****", ""))

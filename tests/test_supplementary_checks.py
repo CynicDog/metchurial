@@ -141,5 +141,60 @@ class TestIntendedCasesStillWork(unittest.TestCase):
         self.assertEqual(sql[start:end + 1], '"0000079"')
 
 
+class TestNotCompoundOperatorDoubleQuotedLiteral(unittest.TestCase):
+    """Real false-negative bug: NOT and IN/LIKE/BETWEEN are each their own
+    _OPERATOR_STARTER_TOKEN_TYPES member (NOT so the fallback's window can
+    even start at a leading NOT; IN/LIKE/BETWEEN so it can start right at
+    them without a NOT). But that meant a *legitimate* NOT IN/NOT LIKE/NOT
+    BETWEEN sequence tripped the "wandered into a new, unrelated
+    comparison" guard on its own second token -- IN/LIKE/BETWEEN right
+    after NOT looks identical, token-type-wise, to a genuinely new
+    comparison starting mid-window (e.g. the `AND item_flag = 'X'` case
+    TestNoCrossComparisonFalsePositive guards against). A bare-quoted
+    ('...') NOT IN/LIKE/BETWEEN never hit this at all -- the structural
+    grammar path (extractor_visitor.py, which explicitly builds "NOT IN"/
+    etc. as one operator) handles those and this fallback is never
+    reached. Only the *double-quoted* literal case is exclusively this
+    fallback's responsibility (see this file's module docstring / the
+    DOUBLE_QUOTE_ID token has no parser-grammar path at all), which is
+    why the bug was invisible for the common bare-quoted form."""
+
+    def test_not_in(self):
+        sql = 'ACCT_ID NOT IN ("0000079");'
+        consumed, results = _run_fallback(sql, ["ACCT_ID"], "ACCT_ID")
+        self.assertGreater(consumed, 0)
+        self.assertEqual(len(results), 1)
+        name, operator, value, line, start, end = results[0]
+        self.assertEqual((name, operator, value, line), ("ACCT_ID", "NOT IN (", '"0000079"', 1))
+        self.assertEqual(sql[start:end + 1], '"0000079"')
+
+    def test_not_like(self):
+        sql = 'ACCT_ID NOT LIKE "000%";'
+        consumed, results = _run_fallback(sql, ["ACCT_ID"], "ACCT_ID")
+        self.assertGreater(consumed, 0)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0][:3], ("ACCT_ID", "NOT LIKE", '"000%"'))
+
+    def test_not_between(self):
+        sql = 'ACCT_ID NOT BETWEEN "0000001" AND "0000099";'
+        consumed, results = _run_fallback(sql, ["ACCT_ID"], "ACCT_ID")
+        self.assertGreater(consumed, 0)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0][:3], ("ACCT_ID", "NOT BETWEEN", '"0000001"'))
+
+    def test_not_before_an_unrelated_second_comparison_still_bails(self):
+        # Regression guard for the fix itself: NOT immediately followed by
+        # something that is NOT IN/LIKE/BETWEEN (e.g. a completely
+        # separate comparison after AND) must still be treated as
+        # "wandered into a new, unrelated comparison" -- the exemption is
+        # narrowly for the NOT+IN/LIKE/BETWEEN compound-operator shape,
+        # not a blanket pass for anything following NOT.
+        consumed, results = _run_fallback(
+            'a.item_no = b.item_no and item_flag not in (\'01\');',
+            ["ITEM_NO", "ITEM_FLAG"], "item_no")
+        self.assertEqual(consumed, 0)
+        self.assertEqual(results, [])
+
+
 if __name__ == "__main__":
     unittest.main()

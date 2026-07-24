@@ -53,6 +53,14 @@ _OPERATOR_STARTER_TOKEN_TYPES = {
     Db2Lexer.NOT,
 }
 
+# The only tokens that legitimately follow a leading NOT as the second
+# half of one compound operator ("NOT IN", "NOT LIKE", "NOT BETWEEN"),
+# not a second, unrelated comparison -- see the "wandered into a new,
+# unrelated comparison" guard below, which would otherwise bail out on
+# this exact token, right after NOT, every single time (both NOT and
+# IN/LIKE/BETWEEN are themselves _OPERATOR_STARTER_TOKEN_TYPES members).
+_NOT_COMPOUND_FOLLOWERS = {Db2Lexer.IN, Db2Lexer.LIKE, Db2Lexer.BETWEEN}
+
 # How far past the column token to look for a comparable literal before
 # giving up -- bounded so a pathological chunk can't turn this into an
 # unbounded scan.
@@ -175,7 +183,8 @@ def make_token_scan_fallback(
             elif literal_idx is None and depth == 0 and pos_in_window > 0 and (
                 candidate.type in (Db2Lexer.AND, Db2Lexer.OR)
                 or candidate.type in _OPERATOR_STARTER_TOKEN_TYPES
-            ):
+            ) and not (prev_token.type == Db2Lexer.NOT
+                      and candidate.type in _NOT_COMPOUND_FOLLOWERS):
                 return 0, None  # wandered into a new, unrelated comparison
             prev_token = candidate
 
