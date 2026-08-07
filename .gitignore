@@ -1,0 +1,11 @@
+.DS_Store
+__pycache__/
+*.pyc
+.venv/
+.idea/
+.ruff_cache/
+gen/
+pypi-dist/
+scripts/
+bad_files.tsv
+_quarantine/

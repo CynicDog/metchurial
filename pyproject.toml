@@ -1,0 +1,52 @@
+[project]
+name = "metchurial"
+version = "1.0.0"
+description = "ANTLR-backed engine that turns DB2 SQL source into structured, queryable metadata -- with hardcoded-sensitive-value detection as one built-in analysis"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.9"
+dependencies = [
+    "antlr4-python3-runtime==4.13.2",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Database",
+    "Topic :: Software Development :: Quality Assurance",
+]
+
+[project.urls]
+Repository = "https://github.com/CynicDog/metchurial"
+Issues = "https://github.com/CynicDog/metchurial/issues"
+
+[project.scripts]
+metchurial = "metchurial.cli:main"
+
+[dependency-groups]
+dev = [
+    "antlr4-tools==0.2.2",
+    "stickytape==0.2.1",
+    "ruff",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/metchurial"]
+# ANTLR debugging artifacts, never read by the Python runtime.
+exclude = ["*.interp", "*.tokens"]
+
+# Package source only -- dist/, vendor/, build/, tests/ are the repo's
+# concern, not the sdist's.
+[tool.hatch.build.targets.sdist]
+only-include = ["src/metchurial", "docs/PROVENANCE.md"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py39"
+extend-exclude = ["src/metchurial/_generated", "vendor"]

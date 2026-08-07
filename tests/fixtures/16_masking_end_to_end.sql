@@ -1,0 +1,21 @@
+-- ==========================================================================
+-- 16_masking_end_to_end.sql
+-- What it does: One instance of every literal shape --mask-literals must
+--   rewrite in place, including the double-quoted and bare-paren forms only
+--   the token scan sees, plus a commented-out predicate that is masked too.
+-- Modules: mask.py, detect/extractor_visitor.py,
+--   detect/supplementary_checks.py, detect/comment_rescan.py
+-- ==========================================================================
+
+SELECT * FROM CUSTOMER WHERE ACCT_ID = '0000001';
+SELECT * FROM CUSTOMER WHERE ACCT_ID = "0000002";
+SELECT * FROM CUSTOMER WHERE ACCT_ID IN ('0000003', '0000004', '0000005');
+SELECT * FROM CUSTOMER WHERE ACCT_ID BETWEEN '0000010' AND '0000020';
+SELECT * FROM CUSTOMER WHERE '0000123' = ACCT_ID;
+SELECT * FROM CUSTOMER WHERE ACCT_ID ('0000030');
+SELECT * FROM CUSTOMER WHERE ACCT_ID IN (('0000040'), ('0000041'));
+SELECT * FROM CUSTOMER WHERE ACCT_ID NOT IN ("0000060");
+SELECT '홍길동' AS DUMMY_NAME FROM SYSIBM.SYSDUMMY1;
+SELECT "강남구" AS DISTRICT FROM SYSIBM.SYSDUMMY1;
+-- ACCT_ID = '0000099'  (commented-out example, still masked)
+SELECT * FROM CUSTOMER WHERE CTRT_NO = '0000050';

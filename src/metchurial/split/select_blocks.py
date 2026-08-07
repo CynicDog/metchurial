@@ -1,0 +1,126 @@
+# -*- coding: utf-8 -*-
+"""Standalone SELECT-block counting and splitting (--split-selects).
+
+A "select block" is one top-level chunk (reusing
+statement_driver.chunk_ranges()'s statement splitting -- top-level ';'
+plus, where no ';' is present, inferred statement starts) that begins with
+(an optional `WITH <cte-list>` prologue, then) SELECT. Classification is a
+cheap, purely token-level pass with no parser involvement at all, so it
+works identically whether or not the parser can build a tree for the
+chunk. A CTE prologue and the SELECT that consumes it are always the same
+chunk by construction -- a WITH clause contains no top-level ';', and
+statement_starts' G4/G5 guards keep the inference from cutting one apart.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+
+from antlr4.Token import Token
+
+from metchurial._generated.Db2Lexer import Db2Lexer
+
+from metchurial.parsing.statement_starts import cte_prologue_end as _cte_prologue_end
+from metchurial.parsing.token_walk import skip_hidden as _skip_hidden
+
+_SPLIT_SUFFIX_RE = re.compile(r"-\d{2,}(\.[^.]+)?$")
+
+
+def classify_chunk(all_tokens: list[Token], start: int, end: int) -> bool:
+    """True iff all_tokens[start:end) is a standalone SELECT block: its
+    first default-channel token is SELECT, or WITH followed by a CTE list
+    (tracking paren depth) that eventually reaches SELECT. Any other
+    leading token (INSERT/UPDATE/DELETE/CREATE/..., or a malformed WITH
+    that never reaches SELECT) -> False.
+
+    The CTE-list walk is parsing.statement_starts.cte_prologue_end, shared
+    with the boundary inference that produced this chunk in the first
+    place."""
+    i = _skip_hidden(all_tokens, start, end)
+    if i is None:
+        return False
+    if all_tokens[i].type == Db2Lexer.SELECT:
+        return True
+    if all_tokens[i].type != Db2Lexer.WITH:
+        return False
+    return _cte_prologue_end(all_tokens, i, end) is not None
+
+
+def select_block_ranges(all_tokens: list[Token],
+                        ranges: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """ranges: statement_driver.chunk_ranges(all_tokens) (passed in, not
+    recomputed). Returns the subsequence classified True, in source
+    order -- both the count (len(...)) and, when --split-selects is on,
+    the list to materialize as split files."""
+    return [r for r in ranges if classify_chunk(all_tokens, r[0], r[1])]
+
+
+def chunk_source_text(text: str, all_tokens: list[Token], start: int, end: int) -> str:
+    """text[first_real.start : last_real.stop + 1], where first_real/
+    last_real are the first/last non-EOF tokens in all_tokens[start:end)
+    -- guards the degenerate EOF token start/stop in the last chunk range
+    (EOF's own start/stop don't correspond to real source positions).
+    Includes the chunk's own leading WITH-prologue and trailing ';' by
+    construction, since that's exactly what chunk_ranges() already
+    delimits. Leading whitespace is stripped -- chunk_ranges() starts a
+    new chunk's range right after the previous chunk's ';', so its first
+    token is typically the newline/whitespace trailing that ';', not
+    meaningful content."""
+    real = [t for t in all_tokens[start:end] if t.type != Token.EOF]
+    if not real:
+        return ""
+    return text[real[0].start:real[-1].stop + 1].lstrip("\r\n \t")
+
+
+def looks_like_split_output(filename: str) -> bool:
+    """True if `filename`'s stem already ends in -NN (2+ digits) right
+    before the extension (or at the very end, if there's no extension) --
+    i.e. this file is itself a previously-written split-select output.
+    Used to refuse to re-split an already-split file on a later re-scan of
+    the same tree."""
+    return _SPLIT_SUFFIX_RE.search(os.path.basename(filename)) is not None
+
+
+def split_output_original_name(filename: str) -> str | None:
+    """If `filename` looks_like_split_output, returns the base name of the
+    original file it would have come from -- e.g. "report-01.sql" ->
+    "report.sql" -- by stripping the -NN suffix. Returns None otherwise.
+    Used by engine.py to tell a split file whose original still sits next
+    to it (the actual double-count risk) apart from one whose original is
+    long gone (write_split_files always deletes it once its split siblings
+    are written), which must be scanned like any other file."""
+    base = os.path.basename(filename)
+    m = _SPLIT_SUFFIX_RE.search(base)
+    if m is None:
+        return None
+    return base[:m.start()] + (m.group(1) or "")
+
+
+def write_split_files(path: str, text: str, all_tokens: list[Token],
+                      ranges: list[tuple[int, int]]) -> list[str]:
+    """path: the original file's path. For each range in `ranges`
+    (already filtered to standalone SELECT blocks via select_block_ranges,
+    in source order), writes "<stem>-NN<ext>" (zero-padded to at least 2
+    digits) alongside the original, containing exactly that range's
+    chunk_source_text(...). Once every split file is written, deletes the
+    original -- safe because the pre-split tree is expected to already be
+    preserved elsewhere (a separate copy of the scan root), so the split
+    files are the only copy that needs to live on disk going forward.
+    No-op (returns []), leaving the original in place, if there's nothing
+    to split apart -- zero blocks, or exactly one (a lone SELECT block has
+    nowhere else to go: writing a "-01<ext>" copy would just duplicate the
+    original under a new name) -- or if looks_like_split_output(path) is
+    True."""
+    if len(ranges) <= 1 or looks_like_split_output(path):
+        return []
+    stem, ext = os.path.splitext(path)
+    width = max(2, len(str(len(ranges))))
+    written = []
+    for i, (start, end) in enumerate(ranges, 1):
+        out_path = "{0}-{1:0{2}d}{3}".format(stem, i, width, ext)
+        with open(out_path, "w", encoding="utf-8") as f:
+            f.write(chunk_source_text(text, all_tokens, start, end))
+        written.append(out_path)
+    os.remove(path)
+    return written

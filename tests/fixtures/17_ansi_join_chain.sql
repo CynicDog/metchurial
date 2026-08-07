@@ -1,0 +1,28 @@
+-- ==========================================================================
+-- 17_ansi_join_chain.sql
+-- What it does: An ANSI JOIN chain mixing INNER, LEFT OUTER, JOIN ... USING
+--   and CROSS JOIN -- none of which had a parse path before table_reference
+--   became directly left-recursive.
+-- Modules: references/table_scan.py, references/relations.py,
+--   parsing/statement_driver.py
+-- ==========================================================================
+
+-- ANSI JOIN...ON/USING chain (INNER/LEFT OUTER/CROSS), previously had no
+-- parse path at all -- see GitHub issue #1 / #4 for the grammar fix.
+SELECT
+    A.ACCT_ID,
+    A.ACCT_NM,
+    B.CTRT_NO,
+    C.STAT_CD,
+    D.TBSAMPLE001
+FROM TBACCT A
+INNER JOIN TBCTRT B
+    ON A.ACCT_ID = B.ACCT_ID
+LEFT OUTER JOIN TBSTAT C
+    ON B.CTRT_NO = C.CTRT_NO
+    AND C.STAT_CD <> '99'
+JOIN TBSAMPLE001 D
+    USING (ACCT_ID)
+CROSS JOIN TBCODE E
+WHERE A.ACCT_ID = '1234567'
+  AND C.STAT_CD IN ('01', '02');
