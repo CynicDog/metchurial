@@ -12,7 +12,8 @@ The one-call entry point::
         print(row.core_id, row.file, row.line)
 
 `scan()` returns a TreeScanResult of typed rows (findings, table/column/
-function references, JOIN edges, query-identity rows); writing report
+function references, JOIN edges, query-identity rows, incremental-load
+watermarks); writing report
 artifacts is the CLI's job (metchurial.cli), not the library's. Use
 `scan_file()` for a single file, `scan_tree()` if you want the same
 signature `scan()` wraps. The generated Db2 lexer/parser lives in the
@@ -30,6 +31,7 @@ from metchurial.models.options import (DEFAULT_EXTENSIONS, DEFAULT_MAX_CHUNK_ITE
 from metchurial.models.references import ColumnUse, FunctionCall, TableUse
 from metchurial.models.relations import RelationEdge, RelationRollup
 from metchurial.models.results import FileScanResult, TreeScanResult
+from metchurial.models.watermarks import WatermarkUse
 
 __version__ = "1.0.0"
 
@@ -41,6 +43,7 @@ __all__ = [
     "TableUse", "ColumnUse", "FunctionCall",
     "RelationEdge", "RelationRollup",
     "IdentityRow", "SimilarityPair",
+    "WatermarkUse",
     "FileScanResult", "TreeScanResult",
     "__version__",
 ]

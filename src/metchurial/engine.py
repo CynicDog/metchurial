@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Orchestrates a full scan: scan_file() drives one file end to end through
-metadata extraction (table/column/function/relation references, opt-in via
+metadata extraction (table/column/function/relation references and
+incremental-load watermarks, opt-in via
 --extract-metadata) alongside sensitive-column comparison detection and
 known-name matching (always on) and split-select counting (opt-in);
 scan_tree() walks a directory tree and merges per-file results, optionally
@@ -44,8 +45,9 @@ from metchurial.models.relations import RelationEdge
 from metchurial.models.results import FileScanResult, TreeScanResult
 from metchurial.models.split import SplitManifestRow
 from metchurial.models.tables import QueryBlock
+from metchurial.models.watermarks import WatermarkUse
 from metchurial.parsing.statement_driver import chunk_ranges, lex_file, parse_file
-from metchurial.references import query_identity, relations, table_scan
+from metchurial.references import query_identity, relations, table_scan, watermarks
 from metchurial.references.function_visitor import FunctionVisitor
 from metchurial.references.reference_visitor import ReferenceVisitor
 from metchurial.split import select_blocks
@@ -224,7 +226,8 @@ def _scan_file_body(path: str, text: str, enc: str, options: ScanOptions,
         lambda col, op, val, line, so, eo: make_hit(col, op, val, line, "N", so, eo))
 
     need_blocks = (options.extract_table_refs or options.extract_column_refs
-                   or options.extract_relations or options.extract_query_identity)
+                   or options.extract_relations or options.extract_query_identity
+                   or options.extract_watermarks)
 
     def pre_chunk_hook(all_tokens: list[Token], start: int, end: int) -> tuple[Any, ...]:
         extra_visitors: list[Any] = []
@@ -292,6 +295,11 @@ def _scan_file_body(path: str, text: str, enc: str, options: ScanOptions,
                 result.column_uses.append(
                     ColumnUse(schema=schema, table=table, column=column, file=path, line=line))
             extra_visitors.append(ReferenceVisitor(blocks, col_sink))
+        if options.extract_watermarks:
+            def watermark_sink(row: WatermarkUse) -> None:
+                result.watermark_uses.append(row)
+            extra_visitors.append(watermarks.make_watermark_visitor(
+                text, path, blocks, chunk_tokens, watermark_sink))
         return tuple(extra_visitors)
 
     all_tokens, _lexer_errors = parse_file(
@@ -510,6 +518,7 @@ def _merge_result(tree: TreeScanResult, path: str, result: FileScanResult,
     tree.relation_edges.extend(result.relation_edges)
     tree.function_calls.extend(result.function_calls)
     tree.identity_rows.extend(result.identity_rows)
+    tree.watermark_uses.extend(result.watermark_uses)
     if result.parse_stats is not None:
         tree.inferred_boundaries += result.parse_stats.inferred_boundaries
     if split_select:

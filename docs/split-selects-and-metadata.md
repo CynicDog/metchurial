@@ -411,6 +411,58 @@ occurrence, not just ones inside a comparison:
   function call and predicate operator actually used, with the exact
   source text of its arguments.
 
+### Incremental-load watermarks
+
+A third parser-tree visitor, `references/watermarks.py`, is *not*
+unconditional: it reports only comparison predicates whose one side is a
+rolling `special register (+|-) duration` expression — the shape a
+watermark-style incremental load is written in
+(`WHERE o.order_date >= CURRENT DATE - 365 DAYS`). It reuses the same
+`classify_predicate` shared classifier the relation and function visitors
+build on, and the same `resolve_qualifier` alias resolution, so a
+watermark column resolves to its owning table exactly the way a
+`refs_columns.tsv` row does.
+
+Three things make the shape recoverable structurally rather than by
+scraping text:
+
+1. `CURRENT DATE`/`CURRENT TIMESTAMP` parse through
+   `datetime_special_register`, which reaches `expression` via
+   `special_register` — but only after the grammar patch this feature
+   needed (see [PROVENANCE.md](PROVENANCE.md)'s fifth round; the rule was
+   previously `special_register : id_`, with `CURRENT` a reserved token
+   rather than an `ID`, so the whole shape had no parse path).
+2. The `- N DAYS` offset is the grammar's own postfix-duration
+   alternative, `expression (YEAR | YEARS | MONTH | MONTHS |
+   day_to_seconds | MICROSECOND | MICROSECONDS)`. It binds *looser* than
+   the additive alternative listed above it, so `CURRENT DATE - 365 DAYS`
+   is really `(CURRENT DATE - 365) DAYS` — the visitor reads the unit off
+   the outer node and the base and amount off the inner `-` node.
+3. `DECODE` and `HEX` aren't reserved lexer tokens, so they were already
+   ordinary `function_invocation`s — a wrapped window
+   (`DECIMAL(CHAR(CURRENT DATE - 3 DAYS, USA), 8, 0)`) is found by
+   descending each wrapper's arguments and recording the call chain as it
+   goes, which is what `pattern`'s `WRAPPED:DECIMAL>CHAR` tag reports.
+
+Scope is `WHERE` at any nesting depth, decided by walking up to the
+*nearest* enclosing clause and requiring it to be a `where_clause`: a
+subquery's or CTE body's own `WHERE` is in scope, while an `ON` condition
+nested inside a `WHERE`'s `EXISTS` subquery is not.
+
+A statement the grammar can't parse whole has no `where_clause` node to
+walk up to at all — the driver recovers it as bare `search_condition`
+fragments instead. Rather than drop those (a corpus of legacy SQL has
+plenty of statements no grammar parses whole, and their incremental
+filters are just as real), scope falls back to a token scan over the
+chunk: a predicate counts as a `WHERE` condition when the nearest
+*preceding* clause keyword is a `WHERE`. That's the same linear, positional
+scoping the driver's own resync anchors use, and the same token-scan style
+`table_scan.py` already relies on where the grammar provides no structure.
+It's an approximation only on that fallback path — a parsed statement is
+always scoped structurally off its tree. Fixture 38's XMLTABLE/
+XMLELEMENT-heavy modules are the worked case: three of their `WHERE`
+windows only come through this way.
+
 ### Worked example: one file through the whole pipeline
 
 Running full `--extract-metadata` extraction (table refs, column refs,
@@ -482,6 +534,15 @@ this statement starts at line 1 of its own file):
 | (no-schema) | TBCTRT | ACCT_ID | 13 |
 | (no-schema) | TBCTRT | CTRT_NO | 15 |
 | (no-schema) | TBSTAT | CTRT_NO | 15 |
+
+**`refs_watermarks.tsv`** (`watermark_uses`) — empty for this statement:
+its `WHERE` filters on literals, not on a rolling window. A statement
+whose `WHERE` read `AND A.OPEN_DT >= CURRENT DATE - 90 DAYS` instead
+would add:
+
+| schema | table | watermark_column | operator | base | window_expression | window_size | pattern | line |
+|---|---|---|---|---|---|---|---|---|
+| (no-schema) | TBACCT | OPEN_DT | >= | CURRENT DATE | `CURRENT DATE - 90 DAYS` | `-90 DAY` | DIRECT | 20 |
 
 Every one of these rows traces back to the same two-pass token-scan
 (`scan_query_blocks`) plus the parser-tree visitors described above,

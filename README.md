@@ -16,7 +16,7 @@ that same parse tree, as specific analyses layered on top of it.
 
 | Capability | Flag | Details |
 |---|---|---|
-| **Metadata extraction** — every table/column/function/predicate reference, JOIN relationships aggregated across the whole scan | `--extract-metadata` | [What it extracts](#what-it-extracts) |
+| **Metadata extraction** — every table/column/function/predicate reference, JOIN relationships aggregated across the whole scan, incremental-load windows | `--extract-metadata` | [What it extracts](#what-it-extracts) |
 | **Sensitive-value detection** — sensitive-column comparisons and known-name literals | *(default, always on)* | [What it detects](#what-it-detects) |
 | **File splitting** — one file per standalone SELECT block | `--split-selects` | [Output artifacts](#output-artifacts) |
 | **Un-split** — best-effort revert of a previous `--split-selects` run, from `split_manifest.tsv` | `--un-split-selects` | [CLI reference](#cli-reference) |
@@ -186,7 +186,7 @@ exactly as before.
 | `root` (positional) | — | Directory to scan recursively |
 | `--sensitive-columns` | `ACCT_ID CTRT_NO ACCT_NM ACCT_NAME` | Column names sensitive-column comparison detection treats as sensitive; fully replaces the default list, doesn't add to it |
 | `--extensions` | `sql txt` | File extensions to scan, without the dot. Same-directory files that reduce to the same name once backup-style extensions are stripped (`query1.sql` / `query1.sql.bak`, or a lone `query1.bak`) count as one file, not two — unless their content actually differs, in which case both are scanned |
-| `--extract-metadata` | off | Also emit `refs_tables.tsv`/`refs_columns.tsv`/`refs_functions.tsv`/`refs_relations.tsv`/`refs_query_identity.tsv` (schema/table/column refs, JOIN relationships, function/predicate usage, per-statement structural identity) and matching summary.md sections — see [Output artifacts](#output-artifacts) |
+| `--extract-metadata` | off | Also emit `refs_tables.tsv`/`refs_columns.tsv`/`refs_functions.tsv`/`refs_relations.tsv`/`refs_query_identity.tsv`/`refs_watermarks.tsv` (schema/table/column refs, JOIN relationships, function/predicate usage, per-statement structural identity, incremental-load windows) and matching summary.md sections — see [Output artifacts](#output-artifacts) |
 | `--identity-granularity` | `structure` | Which structural fact categories discriminate a statement's `core_id`, loosest to strictest: `table` (table set only) → `structure` (+ join types/relationships/query shape — the original, still-default behavior) → `filtered` (+ WHERE predicates) → `strict` (+ GROUP BY, i.e. the full fact set). See [docs/query-identity.md](docs/query-identity.md). Requires `--extract-metadata` unless left at its default |
 | `--query-similarity` | off | Also emit `refs_query_similarity.tsv`: pairwise Jaccard similarity between statements that don't share a `core_id`. Opt-in because the pass is O(n²) in the number of *distinct* core_ids — fine for thousands of distinct queries, slow for tens of thousands. Requires `--extract-metadata` |
 | `--split-selects` | off | For a file with 2+ standalone SELECT blocks, write one `<stem>-NN<ext>` file per block alongside the original, then delete the original and record the mapping in `split_manifest.tsv` (files with a single block are left as-is). Only safe to run against a tree you already have a separate copy of |
@@ -230,10 +230,55 @@ belongs to:
   across the *entire scan* (one graph, not one per file) — how tables in a
   legacy schema actually connect in practice, not what an ER diagram
   claims they should.
+- **Incremental-load watermarks** — every rolling "today minus a window"
+  filter: which column a `WHERE` clause treats as its watermark, how far
+  back the window reaches, and which shape it was written in. See
+  [Incremental-load watermarks](#incremental-load-watermarks) below.
 
 Each of these lands in its own `refs_*.tsv` — see
 [Output artifacts](#output-artifacts) — built to be loaded straight into a
 spreadsheet or a graph tool.
+
+### Incremental-load watermarks
+
+A lot of production DB2 SQL — Informatica-generated ETL especially — does
+watermark-style incremental loads: the `WHERE` clause filters on a
+datetime special register offset by a duration rather than a hardcoded
+date, so the same mapping picks up a rolling slice on every run.
+`refs_watermarks.tsv` makes that auditable across a whole corpus, one row
+per predicate occurrence:
+
+| Written as | `watermark_column` | `base` | `window_size` | `pattern` |
+|---|---|---|---|---|
+| `o.order_date >= CURRENT DATE - 365 DAYS` | `ORDER_DATE` | `CURRENT DATE` | `-365 DAY` | `DIRECT` |
+| `our_month_column = CURRENT DATE - 1 MONTH` | `OUR_MONTH_COLUMN` | `CURRENT DATE` | `-1 MONTH` | `DIRECT` |
+| `load_month = CHAR(CURRENT DATE - 1 MONTH, ISO)` | `LOAD_MONTH` | `CURRENT DATE` | `-1 MONTH` | `WRAPPED:CHAR` |
+| `batch_key = DECIMAL(CHAR(CURRENT DATE - 3 DAYS, USA), 8, 0)` | `BATCH_KEY` | `CURRENT DATE` | `-3 DAY` | `WRAPPED:DECIMAL>CHAR` |
+| `part_key = HEX(CURRENT DATE - 1 MONTH)` | `PART_KEY` | `CURRENT DATE` | `-1 MONTH` | `WRAPPED:HEX` |
+| `txn_date >= CURRENT DATE - DECODE(DAYOFWEEK(CURRENT DATE), 2, 4, 6, 2, 1) DAYS` | `TXN_DATE` | `CURRENT DATE` | `-4 DAY; -2 DAY; -1 DAY` | `DIRECT+CONDITIONAL` |
+
+`window_size` is normalized — sign, amount, and a canonical singular unit
+— so `- 1 MONTH` and `- 2 MONTHS` group together in a corpus-wide count
+instead of splitting on how each file happened to be written. The raw
+source text is kept verbatim in `window_expression` alongside it. A
+weekday-conditional window (the usual "skip the weekend" `DECODE`) has
+several candidate sizes, reported as one `; `-joined cell rather than as
+separate rows, so counting rows still counts predicates.
+
+`pattern` names the shape that matched, as two orthogonal facets so new
+shapes slot in without renaming existing tags: `DIRECT` or
+`WRAPPED:<chain>` (enclosing calls, outermost-first) for the wrapper
+facet, plus `+CONDITIONAL` when the offset amount is a `DECODE` rather
+than a literal.
+
+**Scope**: `WHERE` clauses at any nesting depth — a subquery's or CTE
+body's own `WHERE` defines a windowed record set just as much as the
+outermost one does. `ON` and `HAVING` are excluded (a join condition
+isn't an incremental filter, and neither is a post-aggregation one).
+A bare `WHERE d = CURRENT DATE` with no arithmetic is also excluded —
+there's no window to size. **Known gap**: `case_expression` is a stub rule
+in the vendored grammar, so a `CASE`-conditional window has no parse tree
+to read; `DECODE` is unaffected.
 
 ## What it detects
 
@@ -310,6 +355,7 @@ not a duplicate of it.
 | `refs_functions.tsv` | `--extract-metadata` | Every function call and predicate operator found, with operands/file/line |
 | `refs_relations.tsv` | `--extract-metadata` | Every table-to-table JOIN edge found, one row per occurrence, with join type/predicate/file/line. The cross-file table-pair rollup (grouped by table_a/table_b with a join count) is summary.md's own "## Relations" section, not this file |
 | `refs_query_identity.tsv` | `--extract-metadata` | One `core_id` per statement — structurally identical statements share one id regardless of aliasing/projection/formatting differences |
+| `refs_watermarks.tsv` | `--extract-metadata` | Every incremental-load window filter found, one row per `WHERE` predicate occurrence, with watermark column/operator/base register/raw window expression/normalized window size/pattern/file/line — see [Incremental-load watermarks](#incremental-load-watermarks) |
 | `refs_query_similarity.tsv` | `--query-similarity` | Pairwise Jaccard similarity between distinct `core_id`s that don't match exactly |
 | `split_manifest.tsv` | `--split-selects` | One row per split file actually written: `original_file`, `split_file`, `block_number`, `total_blocks` -- the record of which now-deleted original each split file came from. `--un-split-selects` reads this same file to revert, then rewrites it keeping only the rows it couldn't revert |
 | `quarantine_manifest.tsv` | always (empty unless `--quarantine`) | One row per non-matching-extension file moved to `_quarantine/excluded/`: `original_file`, `quarantined_file` — see [Quarantine](#quarantine) |

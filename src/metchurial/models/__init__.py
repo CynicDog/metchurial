@@ -13,6 +13,7 @@ from metchurial.models.results import FileScanResult, TreeScanResult
 from metchurial.models.statement_boundary import GUARDS, GUARDS_BY_ID, BoundaryGuard
 from metchurial.models.tables import (PLACEHOLDER_SCHEMA, PLACEHOLDER_TABLE, JoinEdge, QueryBlock,
                                TableRef)
+from metchurial.models.watermarks import WatermarkUse
 
 __all__ = [
     "PLACEHOLDER_SCHEMA", "PLACEHOLDER_TABLE",
@@ -21,6 +22,7 @@ __all__ = [
     "TableUse", "ColumnUse", "FunctionCall",
     "RelationEdge", "RelationRollup",
     "IdentityRow", "SimilarityPair",
+    "WatermarkUse",
     "FileScanResult", "TreeScanResult",
     "BoundaryGuard", "GUARDS", "GUARDS_BY_ID",
 ]

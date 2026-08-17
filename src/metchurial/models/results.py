@@ -13,6 +13,7 @@ from metchurial.models.parse_stats import ParseStats
 from metchurial.models.references import ColumnUse, FunctionCall, TableUse
 from metchurial.models.relations import RelationEdge
 from metchurial.models.split import SplitManifestRow
+from metchurial.models.watermarks import WatermarkUse
 
 
 @dataclass
@@ -31,6 +32,7 @@ class FileScanResult:
     split_manifest: list[SplitManifestRow] = field(default_factory=list)
     function_calls: list[FunctionCall] = field(default_factory=list)
     identity_rows: list[IdentityRow] = field(default_factory=list)
+    watermark_uses: list[WatermarkUse] = field(default_factory=list)
     bad_reason: BadFileReason | None = None
     parse_stats: ParseStats | None = None
 
@@ -56,5 +58,6 @@ class TreeScanResult:
     function_calls: list[FunctionCall] = field(default_factory=list)
     bad_files: dict[str, BadFileReason] = field(default_factory=dict)
     identity_rows: list[IdentityRow] = field(default_factory=list)
+    watermark_uses: list[WatermarkUse] = field(default_factory=list)
     file_count: int = 0
     inferred_boundaries: int = 0

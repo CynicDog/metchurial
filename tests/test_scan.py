@@ -446,18 +446,18 @@ class TestBareKoreanAliasWithoutAs(unittest.TestCase):
 class TestTxtExtension(unittest.TestCase):
     def test_txt_included_by_default(self):
         tree = scanner.scan_tree(FIXTURES_DIR)
-        self.assertEqual(tree.file_count, 40)  # 39 .sql + 1 .txt fixture
+        self.assertEqual(tree.file_count, 41)  # 40 .sql + 1 .txt fixture
         self.assertTrue(any(h.value == "'0000070'" for h in tree.findings))
 
     def test_sql_only_when_requested(self):
         tree = scanner.scan_tree(FIXTURES_DIR, ScanOptions(extensions=("sql",)))
-        self.assertEqual(tree.file_count, 39)
+        self.assertEqual(tree.file_count, 40)
         self.assertFalse(any(h.value == "'0000070'" for h in tree.findings))
 
     def test_exclude_paths_skips_own_output_files(self):
         excluded = {os.path.abspath(os.path.join(FIXTURES_DIR, "07_from_txt_export.txt"))}
         tree = scanner.scan_tree(FIXTURES_DIR, exclude_paths=excluded)
-        self.assertEqual(tree.file_count, 39)
+        self.assertEqual(tree.file_count, 40)
         self.assertFalse(any(h.value == "'0000070'" for h in tree.findings))
 
 

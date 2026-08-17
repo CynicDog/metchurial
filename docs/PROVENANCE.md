@@ -123,6 +123,31 @@ restricted environment.
   glued-together run of plain ASCII prose was never distinguishable
   from one long identifier either, so this just brings Hangul to parity
   with how ASCII already worked.
+
+  A fifth round of modifications fixed one more parse-path gap, found
+  while building incremental-load watermark extraction (issue #2):
+  `datetime_special_register` (`CURRENT (DATE | TIME | TIMESTAMP)`) was
+  reachable only from `default_values` -- a DDL `DEFAULT` clause -- and
+  never from `expression`. `expression`'s own `special_register`
+  alternative was `: id_ ;`, and `CURRENT` is a reserved lexer token
+  rather than an `ID`, so a special register had no expression-position
+  parse path at all: an everyday incremental filter like
+  `WHERE o.order_date >= CURRENT DATE - 365 DAYS` failed with "no viable
+  alternative at input" and shredded into resync fragments.
+  `special_register` gained a `datetime_special_register` alternative
+  ahead of its existing `id_` one -- a two-line change reusing a rule the
+  grammar already defined, with no new tokens and no new rules.
+  Everything else those watermark filters are built from already parsed:
+  the `- N DAYS` offset is the existing postfix-duration alternative
+  (`expression (YEAR | YEARS | MONTH | MONTHS | day_to_seconds |
+  MICROSECOND | MICROSECONDS)`), and `DECODE`/`HEX` aren't reserved lexer
+  tokens so they were already ordinary `function_invocation`s.
+  `tests/test_grammar_smoke.py`'s
+  `TestDatetimeSpecialRegisterInExpressions` pins the rule-level
+  behavior (including that a plain identifier still reaches the `id_`
+  alternative), and `tests/test_watermarks.py` pins it end-to-end
+  through the scan pipeline against
+  `tests/fixtures/41_incremental_load_watermarks.sql`.
 - **Why this grammar over the previously-used Oracle PL/SQL grammar**:
   this project originally used `sql/plsql` (Oracle's grammar) as a
   stand-in, on the mistaken belief that no maintained DB2 grammar existed
