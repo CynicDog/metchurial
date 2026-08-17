@@ -22,6 +22,7 @@ from metchurial.models.identity import IdentityRow, SimilarityPair
 from metchurial.models.references import ColumnUse, FunctionCall, TableUse
 from metchurial.models.relations import RelationRollup
 from metchurial.models.results import TreeScanResult
+from metchurial.models.watermarks import WatermarkUse
 from metchurial.tsv import _clean
 
 # Cap on how many literals get joined into one Markdown "Value(s)" cell
@@ -98,8 +99,8 @@ def _name_candidate_counts(name_candidates: list[str]) -> dict[str, int]:
 def _ranked_counts(items: Iterable[Any],
                    key: Callable[[Any], str]) -> list[tuple[str, int]]:
     """{key(item): count}, sorted by count desc then key asc -- shared
-    ranking helper for the Table/Column References and Functions summary
-    sections."""
+    ranking helper for the Table/Column References, Functions and
+    Watermarks summary sections."""
     counts = {}
     for item in items:
         k = key(item)
@@ -332,6 +333,36 @@ def _write_query_identity(out: TextIO, query_identity_rows: list[IdentityRow],
                   "refs_query_similarity.tsv for the full list.\n\n".format(len(query_similarity_rows)))
 
 
+def _write_watermarks(out: TextIO, watermark_uses: list[WatermarkUse]) -> None:
+    out.write("## Watermarks\n\n")
+    if not watermark_uses:
+        out.write("No incremental-load window filters detected.\n\n")
+        return
+    out.write("_Rolling incremental-load windows found in WHERE clauses, ranked by how many "
+              "predicates share a normalized window size; the per-occurrence detail "
+              "(watermark column/window expression/pattern/file/line) is in "
+              "refs_watermarks.tsv._\n\n")
+    # Ranked by window size rather than by file: the corpus-wide question
+    # this section answers is "what load windows does this codebase use",
+    # with refs_watermarks.tsv the place to trace any one of them back to
+    # source. A conditional (DECODE) window contributes each of its own
+    # candidate sizes to the ranking, since each is a window the mapping
+    # really can run with.
+    ranked = _ranked_counts(
+        [size for row in watermark_uses for size in (row.window_size or ("(unsized)",))],
+        key=lambda size: size)
+    out.write("{} incremental-load filter(s) across {} distinct watermark column(s). "
+              "Full detail in refs_watermarks.tsv.\n\n".format(
+                  len(watermark_uses), len({r.watermark_column for r in watermark_uses})))
+    out.write("| Window Size | Filters |\n|---|---:|\n")
+    for size, count in ranked[:MAX_GROUPED_VALUES]:
+        out.write("| `{}` | {} |\n".format(md_escape(size), count))
+    if len(ranked) > MAX_GROUPED_VALUES:
+        out.write("\n_...+{} more window size(s), see refs_watermarks.tsv._\n".format(
+            len(ranked) - MAX_GROUPED_VALUES))
+    out.write("\n")
+
+
 def _write_select_blocks(out: TextIO, select_block_counts: dict[str, int]) -> None:
     out.write("## Select Blocks\n\n")
     nonzero = {f: c for f, c in select_block_counts.items() if c > 0}
@@ -362,8 +393,8 @@ def write_markdown_report(path: str, run_info: dict[str, Any], tree: TreeScanRes
     produces (not a duplicate of any of them). `tree` is the finished
     TreeScanResult; everything section-worthy is read straight off it.
     Sections are written in order: run info, then the opt-in sections --
-    Query Identity / Relations / Functions / Table & Column References,
-    gated by `extract_metadata` -- String Occurrences, Bad Files,
+    Query Identity / Relations / Functions / Table & Column References /
+    Watermarks, gated by `extract_metadata` -- String Occurrences, Bad Files,
     Stopwords, Known Names, Select Blocks (gated by `split_selects`), and
     finally Sensitive Findings (with per-file detail subsections) last. A
     gated section is omitted entirely rather than rendered empty when its
@@ -384,6 +415,7 @@ def write_markdown_report(path: str, run_info: dict[str, Any], tree: TreeScanRes
             _write_relations(out, relations_summary or [])
             _write_functions(out, tree.function_calls)
             _write_references(out, tree.table_uses, tree.column_uses)
+            _write_watermarks(out, tree.watermark_uses)
         _write_string_occurrences(out, tree.name_candidates)
         _write_bad_files(out, previously_bad, tree.bad_files, quarantine)
         _write_stopwords(out, stopwords_count, stopwords_freshly_created)

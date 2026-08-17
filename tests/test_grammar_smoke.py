@@ -149,6 +149,74 @@ class TestFetchRowLimiting(unittest.TestCase):
             self.assertIsNone(remaining, keyword)
 
 
+class TestDatetimeSpecialRegisterInExpressions(unittest.TestCase):
+    """`CURRENT DATE`/`CURRENT TIMESTAMP` in expression position -- the
+    basis for refs_watermarks.tsv (references/watermarks.py).
+
+    The vendored grammar had `datetime_special_register` reachable only
+    from `default_values` (a DDL DEFAULT clause), never from `expression`:
+    `expression`'s own `special_register` alternative was `: id_ ;`, and
+    CURRENT is a reserved lexer token rather than an ID, so
+    `WHERE d >= CURRENT DATE - 365 DAYS` had no parse path at all and
+    shredded into resync fragments. Patched directly in
+    vendor/grammars-v4/Db2Parser.g4 by giving `special_register` a
+    `datetime_special_register` alternative ahead of its `id_` one -- see
+    docs/PROVENANCE.md."""
+
+    def test_bare_special_register_parses_in_a_predicate(self):
+        tree, lex_errs, par_errs, remaining = parse(
+            "SELECT * FROM T WHERE D = CURRENT DATE", "sql_statement")
+        self.assertEqual(lex_errs, [])
+        self.assertEqual(par_errs, [])
+        self.assertIsNone(remaining)
+        self.assertIn("Datetime_special_registerContext", _type_names(tree))
+
+    def test_special_register_arithmetic_parses_as_a_postfix_duration(self):
+        # `CURRENT DATE - 365 DAYS` binds as `(CURRENT DATE - 365) DAYS`:
+        # the additive alternative is listed ahead of the postfix-duration
+        # one in `expression`, so it takes precedence. watermarks.py reads
+        # the tree in exactly that shape -- unit off the outer node, base
+        # and amount off the inner '-' node.
+        tree, lex_errs, par_errs, remaining = parse(
+            "SELECT * FROM T WHERE D >= CURRENT DATE - 365 DAYS", "sql_statement")
+        self.assertEqual(lex_errs, [])
+        self.assertEqual(par_errs, [])
+        self.assertIsNone(remaining)
+        names = _type_names(tree)
+        self.assertIn("Datetime_special_registerContext", names)
+        self.assertIn("Day_to_secondsContext", names)
+
+    def test_every_watermark_shape_from_the_issue_parses_cleanly(self):
+        # The five shapes refs_watermarks.tsv is built to recognize; each
+        # has to parse as one clean tree, not resync fragments, for the
+        # visitor to ever see it. DECODE/HEX aren't reserved lexer tokens,
+        # so they were already ordinary function_invocations -- only the
+        # special register was missing.
+        for predicate in (
+                "D >= CURRENT DATE - 365 DAYS",
+                "OUR_MONTH_COLUMN = CURRENT DATE - 1 MONTH",
+                "LOAD_MONTH = CHAR(CURRENT DATE - 1 MONTH, ISO)",
+                "BATCH_KEY = DECIMAL(CHAR(CURRENT DATE - 3 DAYS, USA), 8, 0)",
+                "TXN_DATE >= CURRENT DATE - DECODE(DAYOFWEEK(CURRENT DATE), 2, 4, 6, 2, 1) DAYS",
+                "PART_KEY = HEX(CURRENT DATE - 1 MONTH)",
+                "CREATED_AT >= CURRENT TIMESTAMP - 7 DAYS"):
+            text = "SELECT * FROM T WHERE " + predicate
+            _tree, lex_errs, par_errs, remaining = parse(text, "sql_statement")
+            self.assertEqual(lex_errs, [], predicate)
+            self.assertEqual(par_errs, [], predicate)
+            self.assertIsNone(remaining, predicate)
+
+    def test_plain_identifier_still_reaches_the_id_alternative(self):
+        # The new alternative sits ahead of `id_` in the same rule, so
+        # this pins that an ordinary identifier expression is unaffected.
+        tree, lex_errs, par_errs, remaining = parse(
+            "SELECT * FROM T WHERE ACCT_ID = '1'", "sql_statement")
+        self.assertEqual(lex_errs, [])
+        self.assertEqual(par_errs, [])
+        self.assertIsNone(remaining)
+        self.assertNotIn("Datetime_special_registerContext", _type_names(tree))
+
+
 class TestStrayUnmatchedParen(unittest.TestCase):
     def test_search_condition_stops_cleanly_before_trailing_stray_paren(self):
         # This is the empirical basis for statement_driver.py's tiered
