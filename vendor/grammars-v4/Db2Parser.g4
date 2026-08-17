@@ -4575,7 +4575,8 @@ constant_
     ;
 
 special_register
-    : id_
+    : datetime_special_register
+    | id_
     ;
 
 global_variable

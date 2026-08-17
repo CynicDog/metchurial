@@ -65,6 +65,7 @@ class ScanOptions:
     extract_relations: bool = False
     extract_functions: bool = False
     extract_query_identity: bool = False
+    extract_watermarks: bool = False
     identity_granularity: str = DEFAULT_IDENTITY_GRANULARITY
     split_selects: bool = False
     workers: int = 1
@@ -79,4 +80,4 @@ class ScanOptions:
         return replace(cls(
             extract_table_refs=True, extract_column_refs=True,
             extract_relations=True, extract_functions=True,
-            extract_query_identity=True), **overrides)
+            extract_query_identity=True, extract_watermarks=True), **overrides)

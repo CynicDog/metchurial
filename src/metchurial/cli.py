@@ -32,6 +32,7 @@ import sys
 from metchurial import interactive as interactive_module
 from metchurial.references import query_identity as query_identity_module
 from metchurial.references import relations as relations_module
+from metchurial.references import watermarks as watermarks_module
 from metchurial.io_utils import (ensure_known_names_template, ensure_stopwords_template, load_bad_files,
                           load_known_names, load_split_manifest, load_stopwords, write_bad_files)
 from metchurial.report import write_markdown_report, write_tsv_report, write_strings_file
@@ -69,6 +70,7 @@ FUNCTIONS_PATH = "refs_functions.tsv"
 RELATIONS_PATH = "refs_relations.tsv"
 QUERY_IDENTITY_PATH = "refs_query_identity.tsv"
 QUERY_SIMILARITY_PATH = "refs_query_similarity.tsv"
+WATERMARKS_PATH = "refs_watermarks.tsv"
 SPLIT_MANIFEST_PATH = "split_manifest.tsv"
 QUARANTINE_MANIFEST_PATH = "quarantine_manifest.tsv"
 
@@ -138,9 +140,12 @@ def main(argv: list[str] | None = None) -> None:
                         "type/predicate/file/line -- comma-joins and explicit JOIN...ON/USING "
                         "alike), "
                         "refs_functions.tsv (every function call and predicate operator found), "
-                        "and refs_query_identity.tsv (a core_id per statement -- structurally "
+                        "refs_query_identity.tsv (a core_id per statement -- structurally "
                         "identical statements share one id regardless of column aliasing/"
                         "projection/derived-column-calculation differences), "
+                        "and refs_watermarks.tsv (every incremental-load window filter found: "
+                        "which column each WHERE clause treats as its watermark, and how far "
+                        "back the rolling window reaches), "
                         "plus matching sections in summary.md (default: off; see README's "
                         "Known Limitations for the JOIN/CTE-related resolution gaps)")
     ap.add_argument("--identity-granularity", choices=list(IDENTITY_GRANULARITIES),
@@ -264,6 +269,7 @@ def main(argv: list[str] | None = None) -> None:
                       FUNCTIONS_PATH if args.extract_metadata else None,
                       RELATIONS_PATH if args.extract_metadata else None,
                       QUERY_IDENTITY_PATH if args.extract_metadata else None,
+                      WATERMARKS_PATH if args.extract_metadata else None,
                       QUERY_SIMILARITY_PATH if args.query_similarity else None,
                       SPLIT_MANIFEST_PATH if (args.split_selects or args.un_split_selects) else None,
                       ) if p}
@@ -450,6 +456,9 @@ def main(argv: list[str] | None = None) -> None:
                        "has_cte", "has_subquery", "has_union",
                        "columns", "tables", "join_types", "relations"],
                       identity_rows)
+        watermark_rows = sorted(tree.watermark_uses, key=lambda r: (r.file, r.line))
+        watermarks_module.write_watermarks_tsv(WATERMARKS_PATH, watermark_rows)
+
         if args.query_similarity:
             query_identity_module.write_similarity_tsv(QUERY_SIMILARITY_PATH, query_similarity_rows)
 
@@ -492,6 +501,8 @@ def main(argv: list[str] | None = None) -> None:
              "granularity={})".format(
                  os.path.abspath(QUERY_IDENTITY_PATH), len(tree.identity_rows),
                  len({r.core_id for r in tree.identity_rows}), args.identity_granularity))
+        print("Watermarks     : {} ({} incremental-load filter(s))".format(
+            os.path.abspath(WATERMARKS_PATH), len(tree.watermark_uses)))
     if args.query_similarity:
         print("Query similarity: {}".format(os.path.abspath(QUERY_SIMILARITY_PATH)))
     if args.split_selects:
