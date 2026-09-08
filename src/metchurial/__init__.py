@@ -33,7 +33,7 @@ from metchurial.models.relations import RelationEdge, RelationRollup
 from metchurial.models.results import FileScanResult, TreeScanResult
 from metchurial.models.watermarks import WatermarkUse
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 
 __all__ = [
     "scan", "scan_file", "scan_tree",
