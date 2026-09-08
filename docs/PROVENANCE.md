@@ -148,6 +148,32 @@ restricted environment.
   alternative), and `tests/test_watermarks.py` pins it end-to-end
   through the scan pipeline against
   `tests/fixtures/41_incremental_load_watermarks.sql`.
+
+  A sixth round of modifications fixed one more parse-path gap, found
+  while hardening `--identity-granularity strict`'s GROUP BY
+  discrimination: `COUNT(*)` -- the single most common aggregate shape in
+  real SQL -- had no parse path at all. `function_invocation`'s `arg_list`
+  is built from `argument: expression | DEFAULT | NULL_`, and `expression`
+  has no alternative that is a bare `'*'` on its own (only `expression '*'
+  expression`, multiplication), so `COUNT ( * )` failed the structural
+  parse and fell to token-skip recovery -- which silently dropped the
+  whole statement's PRED/GROUPBY facts (table facts alone survived, via
+  table_scan's independent token-scan), so two aggregate queries differing
+  only in GROUP BY wrongly shared a core_id even at `strict` if either
+  used `COUNT(*)`. `function_invocation` gained a `'*'` alternative
+  alongside `arg_list`, both still optional so zero-argument calls like
+  `NOW()` keep working:
+
+  ```
+  function_invocation
+      : function_name '(' all_distinct? (arg_list | '*')? ')'
+      ;
+  ```
+
+  `tests/test_grammar_smoke.py`'s `TestCountStarArgument` pins the
+  rule-level behavior, and `tests/test_identity_granularity.py`'s
+  `TestStrictTierSplitsGroupByDifferencesUnderCountStar` pins it
+  end-to-end through the scan pipeline.
 - **Why this grammar over the previously-used Oracle PL/SQL grammar**:
   this project originally used `sql/plsql` (Oracle's grammar) as a
   stand-in, on the mistaken belief that no maintained DB2 grammar existed

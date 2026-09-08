@@ -300,6 +300,57 @@ class TestSubqueryScoping(unittest.TestCase):
         self.assertNotIn("Expression_list_in_parenthesesContext", _type_names(tree))
 
 
+class TestCountStarArgument(unittest.TestCase):
+    """`COUNT(*)` -- the single most common aggregate shape in real SQL,
+    and one that was previously a hard parse failure.
+
+    `function_invocation`'s `arg_list` is built from `argument: expression
+    | DEFAULT | NULL_`, and `expression` has no alternative that is a bare
+    `'*'` on its own (only `expression '*' expression`, multiplication) --
+    so `COUNT ( * )` had no parse path at all and shredded into resync
+    fragments, silently losing PRED/GROUPBY facts for the whole statement
+    downstream in query_identity.py (table facts alone survived, via
+    table_scan's independent token-scan). Patched directly in
+    vendor/grammars-v4/Db2Parser.g4's `function_invocation` rule by adding
+    a `'*'` alternative alongside `arg_list`, both still optional so
+    zero-argument calls like `NOW()` keep working -- see
+    docs/PROVENANCE.md."""
+
+    def test_count_star_parses_as_one_clean_tree(self):
+        tree, lex_errs, par_errs, remaining = parse(
+            "SELECT COUNT(*) FROM T", "sql_statement")
+        self.assertEqual(lex_errs, [])
+        self.assertEqual(par_errs, [])
+        self.assertIsNone(remaining)
+        self.assertIn("Function_invocationContext", _type_names(tree))
+
+    def test_count_star_in_a_group_by_statement_parses_cleanly(self):
+        tree, lex_errs, par_errs, remaining = parse(
+            "SELECT DEPT_CD, COUNT(*) FROM TBEMP GROUP BY DEPT_CD", "sql_statement")
+        self.assertEqual(lex_errs, [])
+        self.assertEqual(par_errs, [])
+        self.assertIsNone(remaining)
+
+    def test_ordinary_column_argument_still_parses(self):
+        # The new alternative sits beside arg_list, not instead of it --
+        # this pins that COUNT(col) is unaffected.
+        tree, lex_errs, par_errs, remaining = parse(
+            "SELECT COUNT(ACCT_ID) FROM T", "sql_statement")
+        self.assertEqual(lex_errs, [])
+        self.assertEqual(par_errs, [])
+        self.assertIsNone(remaining)
+        self.assertIn("Arg_listContext", _type_names(tree))
+
+    def test_zero_argument_call_still_parses(self):
+        # arg_list stayed optional (issue #4's fix), so NOW() -- no
+        # arguments at all, not even '*' -- must still have a parse path.
+        tree, lex_errs, par_errs, remaining = parse(
+            "SELECT NOW() FROM T", "sql_statement")
+        self.assertEqual(lex_errs, [])
+        self.assertEqual(par_errs, [])
+        self.assertIsNone(remaining)
+
+
 class TestCommentNesting(unittest.TestCase):
     def test_block_comments_support_nesting(self):
         # SQL_COMMENT: '/*' (SQL_COMMENT | .)*? '*/' -- unlike the PL/SQL

@@ -5214,7 +5214,7 @@ expression
     ;
 
 function_invocation
-    : function_name '(' all_distinct? arg_list? ')'
+    : function_name '(' all_distinct? (arg_list | '*')? ')'
     ;
 
 all_distinct

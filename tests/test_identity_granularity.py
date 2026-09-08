@@ -43,6 +43,19 @@ GROUPBY_VARIANT_SQL = (
     "GROUP BY A.ACCT_ID;\n"
 )
 
+# COUNT(*) previously had no grammar parse path at all (vendor/grammars-v4/
+# Db2Parser.g4's function_invocation had no '*'-as-argument alternative), so
+# a statement using it fell to token-skip recovery and silently lost its
+# GROUPBY/PRED facts -- these two would have wrongly collapsed onto the same
+# core_id even at `strict`. See docs/PROVENANCE.md and
+# tests/test_grammar_smoke.py's TestCountStarArgument for the rule-level pin.
+COUNT_STAR_GROUPBY_BASE_SQL = (
+    "SELECT A.DEPT_CD, COUNT(*) FROM TBEMP A GROUP BY A.DEPT_CD;\n"
+)
+COUNT_STAR_GROUPBY_VARIANT_SQL = (
+    "SELECT A.DEPT_CD, COUNT(*) FROM TBEMP A GROUP BY A.STAT_CD;\n"
+)
+
 
 def _identity_rows(filename, granularity):
     path = os.path.join(FIXTURES_DIR, filename)
@@ -114,6 +127,26 @@ class TestStrictTierSplitsGroupByDifferences(unittest.TestCase):
     def test_groupby_variant_collapses_at_filtered_tier(self):
         base_id = _scan_sql(GROUPBY_BASE_SQL, "filtered").core_id
         variant_id = _scan_sql(GROUPBY_VARIANT_SQL, "filtered").core_id
+        self.assertEqual(base_id, variant_id)
+
+
+class TestStrictTierSplitsGroupByDifferencesUnderCountStar(unittest.TestCase):
+    """Same discrimination as TestStrictTierSplitsGroupByDifferences, but
+    for the COUNT(*) shape that used to defeat it entirely: before the
+    function_invocation grammar fix, both of these statements failed to
+    parse structurally, lost their GROUPBY fact, and wrongly shared a
+    core_id at every tier including `strict`."""
+
+    def test_groupby_variant_distinct_at_strict_tier(self):
+        base_row = _scan_sql(COUNT_STAR_GROUPBY_BASE_SQL, "strict")
+        variant_row = _scan_sql(COUNT_STAR_GROUPBY_VARIANT_SQL, "strict")
+        self.assertIn("GROUPBY|TBEMP.DEPT_CD", base_row.fact_set)
+        self.assertIn("GROUPBY|TBEMP.STAT_CD", variant_row.fact_set)
+        self.assertNotEqual(base_row.core_id, variant_row.core_id)
+
+    def test_groupby_variant_collapses_at_filtered_tier(self):
+        base_id = _scan_sql(COUNT_STAR_GROUPBY_BASE_SQL, "filtered").core_id
+        variant_id = _scan_sql(COUNT_STAR_GROUPBY_VARIANT_SQL, "filtered").core_id
         self.assertEqual(base_id, variant_id)
 
 
