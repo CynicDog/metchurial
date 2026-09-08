@@ -127,6 +127,25 @@ class TestGuards(unittest.TestCase):
         self.assertEqual(len(_chunks("SELECT a FROM t1\nEXCEPT\nSELECT b FROM t2\n")), 1)
         self.assertEqual(len(_chunks("SELECT a FROM t1\nINTERSECT\nSELECT b FROM t2\n")), 1)
 
+    def test_g1_minus_is_not_a_boundary(self):
+        """MINUS isn't a reserved keyword in DB2's grammar (Db2Parser.g4
+        fullselect only reserves UNION/EXCEPT/INTERSECT), so real-world
+        MINUS usage lexes as a plain ID -- previously this fell through
+        every guard and the second SELECT was mistaken for a new
+        statement, shredding a single MINUS query into two split files."""
+        self.assertEqual(len(_chunks("SELECT a FROM t1\nMINUS\nSELECT b FROM t2\n")), 1)
+
+    def test_g1_minus_is_case_insensitive(self):
+        self.assertEqual(len(_chunks("SELECT a FROM t1\nminus\nSELECT b FROM t2\n")), 1)
+
+    def test_g1_minus_as_a_column_alias_still_splits(self):
+        """MINUS is an ordinary identifier, not a keyword -- it only
+        suppresses a boundary immediately before the next candidate
+        keyword (the real set-operator position). Used elsewhere, such as
+        a column alias, it must not swallow the next statement."""
+        chunks = _chunks("SELECT a AS MINUS FROM t1\n\nSELECT b FROM t2\n")
+        self.assertEqual(len(chunks), 2)
+
     def test_depth_guards_subquery(self):
         self.assertEqual(len(_chunks(
             "SELECT a FROM t1\nWHERE x IN (\n  SELECT y FROM t2\n)\n")), 1)

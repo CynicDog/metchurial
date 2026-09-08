@@ -107,6 +107,16 @@ SUPPRESS_PREV_GUARD: dict[int, BoundaryGuard] = {
 # consulted to attribute a suppression to the guard that caused it.
 SUPPRESS_PREV = frozenset(SUPPRESS_PREV_GUARD)
 
+# Same idea as SUPPRESS_PREV_GUARD, keyed by upper-cased ID token text
+# instead of token type -- for words (currently just MINUS, see G1) that
+# the grammar doesn't reserve, so the lexer never gives them a type of
+# their own to key on.
+SUPPRESS_PREV_WORD_GUARD: dict[str, BoundaryGuard] = {
+    word: guard
+    for guard in GUARDS
+    for word in guard.prev_words
+}
+
 
 def cte_prologue_end(tokens: list[Token], with_idx: int, n: int) -> int | None:
     """tokens[with_idx] is WITH. Walks the CTE list that should follow --
@@ -260,6 +270,13 @@ def _suppressing_guard(tokens: list[Token], i: int, end: int, prev_idx: int,
     guard = SUPPRESS_PREV_GUARD.get(tokens[prev_idx].type)
     if guard is not None:
         return guard
+
+    # G1 (MINUS) -- same test by upper-cased text, for a word that isn't
+    # a reserved keyword and so has no dedicated token type of its own.
+    if tokens[prev_idx].type == Db2Lexer.ID:
+        guard = SUPPRESS_PREV_WORD_GUARD.get(tokens[prev_idx].text.upper())
+        if guard is not None:
+            return guard
 
     # G3 -- a non-SELECT statement gets one free depth-0 SELECT, which is
     # its body: "INSERT INTO t" / "SELECT ...", "CREATE TABLE t AS" /

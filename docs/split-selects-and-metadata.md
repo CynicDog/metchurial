@@ -177,16 +177,16 @@ never reaches any of them.
 The guards are a domain model, not an if-chain:
 `models/statement_boundary.py` enumerates them as `BoundaryGuard` records
 (`guard_id`, `name`, `rationale`, `example`, and for G1/G2 the
-`prev_tokens` that define them), and `statement_starts.py` builds its
-lookup table from that data rather than restating it. Each guard's
-`example` is SQL that must stay a single statement, and
+`prev_tokens`/`prev_words` that define them), and `statement_starts.py`
+builds its lookup tables from that data rather than restating it. Each
+guard's `example` is SQL that must stay a single statement, and
 `tests/test_statement_starts.py` runs every one through the real splitter
 and asserts that guard actually fires on it — so a guard cannot rot into
 dead code and the model cannot drift from the implementation.
 
 | | Guard | Keeps whole |
 |---|---|---|
-| **G1** | Previous token is a set operator (`UNION`/`INTERSECT`/`EXCEPT`/`MINUS`/`ALL`/`DISTINCT`) | `SELECT ...` ⏎ `UNION ALL` ⏎ `SELECT ...` |
+| **G1** | Previous token is a set operator (`UNION`/`INTERSECT`/`EXCEPT`/`ALL`/`DISTINCT`), or its text is `MINUS` (not a reserved DB2 keyword, so it lexes as a plain identifier) | `SELECT ...` ⏎ `UNION ALL` ⏎ `SELECT ...`; `SELECT ...` ⏎ `MINUS` ⏎ `SELECT ...` |
 | **G2** | Previous token demands a query next (`AS`, `FOR`, `THEN`, `ELSE`, `WHEN`, `,`, `.`, `(`, `INTO`, `RETURN`) | `CREATE VIEW v AS` ⏎ `SELECT`; `DECLARE c CURSOR FOR` ⏎ `SELECT`; `WHEN MATCHED THEN` ⏎ `UPDATE SET` |
 | **G3** | A non-SELECT statement gets one free depth-0 `SELECT` — its body | `INSERT INTO t` ⏎ `SELECT ...`; `CREATE TABLE t AS` ⏎ `SELECT ...` |
 | **G4** | The `SELECT` closing the current statement's own CTE prologue | `WITH a AS (...)` ⏎ `SELECT ...` |

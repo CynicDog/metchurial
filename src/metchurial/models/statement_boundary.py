@@ -26,6 +26,16 @@ parsing/statement_starts.py resolves each name against the generated
 lexer when it builds its lookup table. A typo therefore fails loudly at
 import time, not silently at scan time.
 
+`prev_words` is the same idea for tokens that have no type of their own
+to key on: DB2's grammar (Db2Parser.g4 `fullselect`) doesn't reserve
+MINUS as a set-operator keyword at all -- only UNION/EXCEPT/INTERSECT --
+so real-world MINUS usage (DB2's textual EXCEPT synonym under Oracle
+compatibility) lexes as a plain ID token, indistinguishable by *type*
+from any other identifier. These are matched by upper-cased token *text*
+instead, and only against Db2Lexer.ID -- never against a token that
+already has its own reserved type, so a genuine keyword token is still
+matched via prev_tokens and never doubly-triggers here.
+
 Guards that cannot be expressed as "the previous token was one of these"
 carry no `prev_tokens` and are implemented procedurally against the
 in-progress statement's state (does it lead with SELECT, has its one free
@@ -46,13 +56,17 @@ class BoundaryGuard:
     trips this guard -- verified by test, not by assertion in prose.
     `prev_tokens`, when non-empty, are Db2Lexer token type names whose
     presence immediately before a candidate keyword means "continuation";
-    an empty tuple means the guard is implemented procedurally."""
+    `prev_words`, when non-empty, are upper-cased ID token *texts* with
+    the same meaning, for words the grammar doesn't reserve so they carry
+    no type of their own. An empty `prev_tokens` and `prev_words` means
+    the guard is implemented procedurally."""
 
     guard_id: str
     name: str
     rationale: str
     example: str
     prev_tokens: tuple[str, ...] = ()
+    prev_words: tuple[str, ...] = ()
 
 
 # Evaluation order matters and mirrors parsing/statement_starts.py: G4
@@ -75,9 +89,13 @@ GUARDS: tuple[BoundaryGuard, ...] = (
             "A set operator is the one legal way a depth-0 SELECT "
             "continues a statement rather than starting one. ALL/DISTINCT "
             "cover UNION ALL / UNION DISTINCT written with the second "
-            "SELECT on the next line."),
+            "SELECT on the next line. MINUS isn't in DB2's grammar as a "
+            "set-operator keyword (Db2Parser.g4 fullselect only reserves "
+            "UNION/EXCEPT/INTERSECT), so real MINUS usage lexes as a "
+            "plain ID and is matched by text via prev_words instead."),
         example="SELECT A.ACCT_ID FROM TBACCT A\nUNION ALL\nSELECT S.ACCT_ID FROM TBSTAT S\n",
-        prev_tokens=("UNION", "INTERSECT", "EXCEPT", "MINUS", "ALL", "DISTINCT"),
+        prev_tokens=("UNION", "INTERSECT", "EXCEPT", "ALL", "DISTINCT"),
+        prev_words=("MINUS",),
     ),
     BoundaryGuard(
         guard_id="G2",
