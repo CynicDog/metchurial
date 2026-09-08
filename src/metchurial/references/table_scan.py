@@ -186,12 +186,28 @@ def _qualifiers_of(parts: list[Token]) -> tuple[str, ...]:
 def _capture_predicate_text(tokens: list[Token], start_i: int, n: int) -> tuple[str, tuple[str, ...], int]:
     """Raw source text of a JOIN's ON-clause (or any search-condition-
     shaped fragment), from start_i up to (not including) the next WHERE/
-    GROUP/ORDER/JOIN-family-keyword/COMMA/SEMI/EOF at the *current* paren
-    depth (relative to start_i, clamped at 0 -- same technique
-    statement_driver.chunk_ranges() uses for top-level ';' splitting).
-    Returns (text, qualifiers, next_index) -- `qualifiers` are the
-    predicate's own dotted-name qualifiers (see _qualifiers_of), used by
-    _resolve_pair to derive the connector's real table pair."""
+    GROUP/ORDER/JOIN-family-keyword/COMMA/SEMI/EOF/SELECT/set-operator at
+    the *current* paren depth (relative to start_i, clamped at 0 -- same
+    technique statement_driver.chunk_ranges() uses for top-level ';'
+    splitting). Returns (text, qualifiers, next_index) -- `qualifiers` are
+    the predicate's own dotted-name qualifiers (see _qualifiers_of), used
+    by _resolve_pair to derive the connector's real table pair.
+
+    SELECT/UNION/INTERSECT/EXCEPT stop the capture even though none of
+    them can legally follow inside a real ON-clause search_condition: an
+    arm with no WHERE between its own JOIN's ON-clause and a following
+    `UNION [ALL] SELECT ...` sibling has nothing else at depth 0 to stop
+    on, so without this the capture ran straight through the set-operator
+    keyword into the next arm's own SELECT list, and every comma in that
+    list masqueraded as this JOIN's own table-list comma (see GitHub
+    issue #1 -- the very first item after that runaway FROM/comma still
+    landed correctly as this arm's own table, since _scan_table_list read
+    it as a normal comma-joined entry; only the *next* arm's select-list
+    items downstream of it leaked as bogus TableRefs, and only that next
+    arm, since scan resumes cleanly once a real SELECT token is finally
+    seen). A subquery in a real ON-clause is always parenthesized, so it
+    never reaches this branch at depth 0 -- these tokens are only ever
+    hit here by the runaway walk this guards against."""
     depth = 0
     parts = []
     i = start_i
@@ -208,7 +224,8 @@ def _capture_predicate_text(tokens: list[Token], start_i: int, n: int) -> tuple[
             depth -= 1
         elif depth == 0 and (
             t.type in (Db2Lexer.WHERE, Db2Lexer.GROUP, Db2Lexer.ORDER,
-                      Db2Lexer.SEMI, Token.EOF, Db2Lexer.COMMA)
+                      Db2Lexer.SEMI, Token.EOF, Db2Lexer.COMMA, Db2Lexer.SELECT)
+            or t.type in _SET_OPERATOR_TYPES
             or _match_join_qualifier(tokens, i) is not None
         ):
             break

@@ -160,6 +160,74 @@ class TestQueryBlockScoping(unittest.TestCase):
                          (ts.PLACEHOLDER_SCHEMA, ts.PLACEHOLDER_TABLE))
 
 
+class TestJoinedFirstArmDoesNotLeakIntoSetOperatorSibling(unittest.TestCase):
+    """GitHub issue #1: when the first arm of a UNION/INTERSECT/EXCEPT has
+    a JOIN and no WHERE separates its ON-clause from the next arm's own
+    SELECT, _capture_predicate_text's ON-clause capture had nothing at
+    depth 0 to stop on -- WHERE/GROUP/ORDER/SEMI/EOF/COMMA/a following
+    JOIN keyword, but not SELECT or a set operator -- so it ran straight
+    through `UNION ALL` into the next arm's select-list, and every comma
+    in that list was mistaken for this JOIN's own table-list comma. Only
+    the *next* arm (not the one after that) was affected, and only the
+    select-list items after its first, matching the issue's own
+    bisection table."""
+
+    def test_join_then_union_all_does_not_leak_next_arms_select_list(self):
+        blocks = _blocks_for(
+            "SELECT c.CUST_ID FROM SALES.CUSTOMER c "
+            "JOIN REF.REGION g ON g.RGN_CD = c.RGN_CD\n"
+            "UNION ALL\n"
+            "SELECT a.CUST_ID, a.CUST_NM, NULL FROM ARCHIVE.CUSTOMER_HIST a\n")[0]
+        tables = {(t.schema, t.table) for qb in blocks for t in qb.tables}
+        self.assertEqual(tables, {
+            ("REF", "REGION"), ("SALES", "CUSTOMER"), ("ARCHIVE", "CUSTOMER_HIST"),
+        })
+        self.assertNotIn("CUST_NM", {t.table for qb in blocks for t in qb.tables})
+        self.assertNotIn("NULL", {t.table for qb in blocks for t in qb.tables})
+
+    def test_only_the_next_arm_is_affected(self):
+        # A third arm past the joined-then-unioned pair must scan clean --
+        # scanning resumes correctly the moment the runaway walk finally
+        # reaches a real SELECT token (the third arm's own).
+        blocks = _blocks_for(
+            "SELECT c.CUST_ID FROM SALES.CUSTOMER c "
+            "JOIN REF.REGION g ON g.RGN_CD = c.RGN_CD\n"
+            "UNION ALL\n"
+            "SELECT a.C1, a.C2 FROM ARCHIVE.CUSTOMER_HIST a\n"
+            "UNION ALL\n"
+            "SELECT b.C1, b.C2 FROM ARCHIVE.CUSTOMER_OLD b\n")[0]
+        tables = {(t.schema, t.table) for qb in blocks for t in qb.tables}
+        self.assertEqual(tables, {
+            ("REF", "REGION"), ("SALES", "CUSTOMER"),
+            ("ARCHIVE", "CUSTOMER_HIST"), ("ARCHIVE", "CUSTOMER_OLD"),
+        })
+        self.assertNotIn("C2", {t.table for qb in blocks for t in qb.tables})
+
+    def test_intersect_and_except_are_covered_the_same_way(self):
+        for op in ("INTERSECT", "EXCEPT"):
+            with self.subTest(op=op):
+                blocks = _blocks_for(
+                    "SELECT c.CUST_ID FROM SALES.CUSTOMER c "
+                    "LEFT JOIN REF.REGION g ON g.RGN_CD = c.RGN_CD\n"
+                    "{}\n"
+                    "SELECT a.CUST_ID, a.CUST_NM FROM ARCHIVE.CUSTOMER_HIST a\n".format(op))[0]
+                tables = {(t.schema, t.table) for qb in blocks for t in qb.tables}
+                self.assertEqual(tables, {
+                    ("REF", "REGION"), ("SALES", "CUSTOMER"), ("ARCHIVE", "CUSTOMER_HIST"),
+                })
+
+    def test_join_predicate_text_is_still_captured_correctly(self):
+        # The fix must not truncate a real ON-clause that legitimately
+        # ends at WHERE/EOF -- only the runaway-into-the-next-arm case.
+        blocks = _blocks_for(
+            "SELECT c.CUST_ID FROM SALES.CUSTOMER c "
+            "JOIN REF.REGION g ON g.RGN_CD = c.RGN_CD\n"
+            "UNION ALL\n"
+            "SELECT a.CUST_ID FROM ARCHIVE.CUSTOMER_HIST a\n")[0]
+        edges = _edges(blocks)
+        self.assertIn(("G", "C", "JOIN"), edges)
+
+
 class TestDerivedTable(unittest.TestCase):
     def test_inner_table_of_derived_table_is_found(self):
         # Regression guard for a real bug caught during development: the
