@@ -18,9 +18,16 @@ Two sources of join edges feed into this:
    never both, or every comma-join would be double-counted.
 2. "WHERE-IMPLICIT" edges (_JoinPredicateVisitor below): an ordinary
    binary comparison between two table/alias-qualified columns that
-   resolve, via table_scan.resolve_qualifier, to two distinct real tables
-   in the same query block. This is the sole source for comma-joins (see
-   above), and also independently catches an explicit JOIN's own
+   resolve, via table_scan.resolve_qualifier_ref, to two distinct
+   TableRef instances in the same query block -- distinct *instances*,
+   not just distinct schema.table names, so a self-join (`FROM emp e1,
+   emp e2 WHERE e1.mgr_id = e2.emp_id`) is correctly kept: e1/e2 resolve
+   to two different TableRefs that happen to share a table name, unlike
+   `FROM emp e WHERE e.hire_date = emp.term_date`, where "E" and "EMP"
+   both resolve to the *same* TableRef (see models/tables.py's
+   QueryBlock.add_table) and the comparison is correctly dropped as one
+   row's own columns, not a join. This is the sole source for comma-joins
+   (see above), and also independently catches an explicit JOIN's own
    ON-clause comparison as an ordinary descendant of the committed tree.
    engine.py's pre_chunk_hook dedupes that case against source 1's
    non-comma edges for the same table pair in the same chunk -- a coarser
@@ -52,7 +59,9 @@ class _JoinPredicateVisitor(Db2ParserVisitor):
     comparison (=, <, >, <=, >=, <>) between two table/alias-qualified
     column references (field_reference -- a bare, unqualified column_name
     can never be told apart from two different tables) that resolve to
-    two distinct real (non-placeholder) tables in the same query block."""
+    two distinct real (non-placeholder) TableRef instances in the same
+    query block -- see the module docstring's source 2 for why "distinct
+    instances" (not just distinct table names) is the right test."""
 
     def __init__(self, query_blocks: list[QueryBlock],
                  sink: Callable[[str, str, str, str, str, str, int], None]) -> None:
@@ -73,12 +82,14 @@ class _JoinPredicateVisitor(Db2ParserVisitor):
             return
         lq = lfref.row_variable_name().getText().upper()
         rq = rfref.row_variable_name().getText().upper()
-        lschema, ltable = table_scan.resolve_qualifier(self.query_blocks, left.start.start, lq)
-        rschema, rtable = table_scan.resolve_qualifier(self.query_blocks, right.start.start, rq)
-        if ltable == table_scan.PLACEHOLDER_TABLE or rtable == table_scan.PLACEHOLDER_TABLE:
+        lref = table_scan.resolve_qualifier_ref(self.query_blocks, left.start.start, lq)
+        rref = table_scan.resolve_qualifier_ref(self.query_blocks, right.start.start, rq)
+        if lref is None or rref is None:
             return
-        if (lschema, ltable) == (rschema, rtable):
-            return  # same table on both sides -- not a join
+        if lref is rref:
+            return  # same TableRef on both sides -- one row's own columns, not a join
+        lschema, ltable = lref.schema, lref.table
+        rschema, rtable = rref.schema, rref.table
         lcol = lfref.field_name().getText().upper()
         rcol = rfref.field_name().getText().upper()
         predicate = "{}.{} {} {}.{}".format(ltable, lcol, operator, rtable, rcol)

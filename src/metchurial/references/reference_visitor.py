@@ -36,9 +36,9 @@ class ReferenceVisitor(Db2ParserVisitor):
         constructed (see engine.py's pre_chunk_hook, which builds one
         ReferenceVisitor per chunk closing over that chunk's own blocks).
         sink: callable(schema, table, column, line) invoked once per
-        syntactic column-reference occurrence -- not pre-deduplicated;
-        dedup happens at the report layer (tsv.write_refs_tsv), same
-        division of labor as ExtractorVisitor's sink convention."""
+        syntactic column-reference occurrence -- not deduplicated
+        anywhere, so a column referenced N times in one chunk yields N
+        rows in refs_columns.tsv."""
         self.query_blocks = query_blocks
         self.sink = sink
 

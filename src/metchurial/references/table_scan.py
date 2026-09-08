@@ -49,12 +49,13 @@ from metchurial.models.tables import (PLACEHOLDER_SCHEMA, PLACEHOLDER_TABLE, Joi
                                TableRef)
 from metchurial.parsing.token_walk import looks_like_name_segment as _looks_like_name_segment
 from metchurial.parsing.token_walk import looks_like_name_start
+from metchurial.parsing.token_walk import name_text as _name_text
 from metchurial.parsing.token_walk import skip_balanced_parens as _skip_balanced_parens
 from metchurial.parsing.token_walk import skip_hidden as _skip_hidden
 
 __all__ = ["PLACEHOLDER_SCHEMA", "PLACEHOLDER_TABLE", "TableRef", "QueryBlock", "JoinEdge",
            "looks_like_name_start", "find_cte_names", "has_set_operator", "scan_query_blocks",
-           "scan_join_edges", "resolve_qualifier", "iter_table_refs"]
+           "scan_join_edges", "resolve_qualifier", "resolve_qualifier_ref", "iter_table_refs"]
 
 # looks_like_name_start / looks_like_name_segment (and the token sets they
 # rest on) grew here but now live in parsing/token_walk.py, so that
@@ -76,7 +77,8 @@ _JOIN_QUALIFIER_TYPES = {
 # grammar limitation with the same root cause as issue #1's
 # reserved-keyword-colliding alias item). This token-scan is independent
 # of the parser, so it accepts them as aliases alongside plain ID.
-_ALIAS_TOKEN_TYPES = {Db2Lexer.ID, Db2Lexer.G, Db2Lexer.K, Db2Lexer.M, Db2Lexer.P_, Db2Lexer.S_}
+_ALIAS_TOKEN_TYPES = {Db2Lexer.ID, Db2Lexer.G, Db2Lexer.K, Db2Lexer.M, Db2Lexer.P_, Db2Lexer.S_,
+                     Db2Lexer.DOUBLE_QUOTE_ID}
 
 
 def _last_real_token(tokens: list[Token]) -> Token | None:
@@ -102,7 +104,7 @@ def find_cte_names(tokens: list[Token]) -> set[str]:
     while i is not None:
         if not looks_like_name_start(tokens[i]):
             break
-        names.add(tokens[i].text.upper())
+        names.add(_name_text(tokens[i]))
         i = _skip_hidden(tokens, i + 1, n)
         if i is not None and tokens[i].type == Db2Lexer.LEFT_RND_BKT:
             # optional column_name_list_paren before AS
@@ -178,7 +180,7 @@ def _qualifiers_of(parts: list[Token]) -> tuple[str, ...]:
     '.') in source order, e.g. ('A', 'B') for `a.x = b.y`. Chained dotted
     names contribute every segment before a dot (`s.t.c` -> ('S', 'T'));
     non-alias segments are filtered out downstream by alias_map lookup."""
-    return tuple(parts[k - 1].text.upper()
+    return tuple(_name_text(parts[k - 1])
                  for k, t in enumerate(parts)
                  if t.type == Db2Lexer.DOT and k > 0)
 
@@ -197,16 +199,10 @@ def _capture_predicate_text(tokens: list[Token], start_i: int, n: int) -> tuple[
     them can legally follow inside a real ON-clause search_condition: an
     arm with no WHERE between its own JOIN's ON-clause and a following
     `UNION [ALL] SELECT ...` sibling has nothing else at depth 0 to stop
-    on, so without this the capture ran straight through the set-operator
-    keyword into the next arm's own SELECT list, and every comma in that
-    list masqueraded as this JOIN's own table-list comma (see GitHub
-    issue #1 -- the very first item after that runaway FROM/comma still
-    landed correctly as this arm's own table, since _scan_table_list read
-    it as a normal comma-joined entry; only the *next* arm's select-list
-    items downstream of it leaked as bogus TableRefs, and only that next
-    arm, since scan resumes cleanly once a real SELECT token is finally
-    seen). A subquery in a real ON-clause is always parenthesized, so it
-    never reaches this branch at depth 0 -- these tokens are only ever
+    on, so without this the capture ran into the next arm's own SELECT
+    list and leaked its commas as bogus table-list entries (see GitHub
+    issue #1). A subquery in a real ON-clause is always parenthesized, so
+    it never reaches this branch at depth 0 -- these tokens are only ever
     hit here by the runaway walk this guards against."""
     depth = 0
     parts = []
@@ -280,13 +276,13 @@ def _scan_one_table_ref(tokens: list[Token], i: int, cte_names: set[str],
 
     line = tok.line
     start_char = tok.start
-    part1 = tok.text.upper()
+    part1 = _name_text(tok)
     schema, table, stop_char = PLACEHOLDER_SCHEMA, part1, tok.stop
     j = _skip_hidden(tokens, i + 1, n)
     if j is not None and tokens[j].type == Db2Lexer.DOT:
         j2 = _skip_hidden(tokens, j + 1, n)
         if j2 is not None and _looks_like_name_segment(tokens[j2]):
-            schema, table = part1, tokens[j2].text.upper()
+            schema, table = part1, _name_text(tokens[j2])
             stop_char = tokens[j2].stop
             j = j2 + 1
             j3 = _skip_hidden(tokens, j, n)
@@ -297,7 +293,7 @@ def _scan_one_table_ref(tokens: list[Token], i: int, cte_names: set[str],
                     # "table" (the 2nd part) is really the schema; catalog
                     # (part1) is dropped, documented limitation.
                     schema = table
-                    table = tokens[j4].text.upper()
+                    table = _name_text(tokens[j4])
                     stop_char = tokens[j4].stop
                     j = j4 + 1
     else:
@@ -309,12 +305,12 @@ def _scan_one_table_ref(tokens: list[Token], i: int, cte_names: set[str],
     if k is not None and tokens[k].type == Db2Lexer.AS:
         k2 = _skip_hidden(tokens, k + 1, n)
         if k2 is not None and tokens[k2].type in _ALIAS_TOKEN_TYPES:
-            alias = tokens[k2].text.upper()
+            alias = _name_text(tokens[k2])
             j = k2 + 1
         else:
             j = k + 1
     elif k is not None and tokens[k].type in _ALIAS_TOKEN_TYPES:
-        alias = tokens[k].text.upper()
+        alias = _name_text(tokens[k])
         j = k + 1
 
     # A CTE reference still becomes a real TableRef (needed so its alias
@@ -570,6 +566,38 @@ def scan_join_edges(query_blocks: list[QueryBlock]) -> list[JoinEdge]:
     return edges
 
 
+def resolve_qualifier_ref(query_blocks: list[QueryBlock], char_offset: int | None,
+                          qualifier: str | None, include_cte: bool = False) -> TableRef | None:
+    """Same lookup as resolve_qualifier (see its docstring for the
+    char_offset/include_cte contract), but returns the resolved TableRef
+    itself instead of flattening it to a (schema, table) string pair --
+    for a caller that needs to tell two distinct references to the same
+    schema.table apart (e.g. relations.py distinguishing a genuine
+    self-join, two different aliases resolving to two different TableRef
+    instances of the same table, from a single table referenced twice by
+    alias and by its own bare name -- both resolving to the *same*
+    instance). Returns None wherever resolve_qualifier would return the
+    PLACEHOLDER_SCHEMA/TABLE pair."""
+    if qualifier is None or char_offset is None:
+        return None
+    best = None
+    for qb in query_blocks:
+        if qb.stop_char is None:
+            continue
+        if qb.start_char <= char_offset <= qb.stop_char:
+            span = qb.stop_char - qb.start_char
+            if best is None or span < best[0]:
+                best = (span, qb)
+    if best is None:
+        return None
+    ref = best[1].alias_map.get(qualifier.upper())
+    if ref is None:
+        return None
+    if ref.is_cte and not include_cte:
+        return None
+    return ref
+
+
 def resolve_qualifier(query_blocks: list[QueryBlock], char_offset: int | None,
                       qualifier: str | None, include_cte: bool = False) -> tuple[str, str]:
     """qualifier: upper-cased alias text (a field_reference's
@@ -594,22 +622,8 @@ def resolve_qualifier(query_blocks: list[QueryBlock], char_offset: int | None,
     None too -- a heavily error-recovered tree (e.g. from a file with a
     lot of non-SQL noise) can hand back a context whose own token
     position didn't resolve to a real offset."""
-    if qualifier is None or char_offset is None:
-        return PLACEHOLDER_SCHEMA, PLACEHOLDER_TABLE
-    best = None
-    for qb in query_blocks:
-        if qb.stop_char is None:
-            continue
-        if qb.start_char <= char_offset <= qb.stop_char:
-            span = qb.stop_char - qb.start_char
-            if best is None or span < best[0]:
-                best = (span, qb)
-    if best is None:
-        return PLACEHOLDER_SCHEMA, PLACEHOLDER_TABLE
-    ref = best[1].alias_map.get(qualifier.upper())
+    ref = resolve_qualifier_ref(query_blocks, char_offset, qualifier, include_cte)
     if ref is None:
-        return PLACEHOLDER_SCHEMA, PLACEHOLDER_TABLE
-    if ref.is_cte and not include_cte:
         return PLACEHOLDER_SCHEMA, PLACEHOLDER_TABLE
     return ref.schema, ref.table
 

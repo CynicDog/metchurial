@@ -172,7 +172,9 @@ def main(argv: list[str] | None = None) -> None:
                         "as-is -- there's nothing to split apart). split_manifest.tsv "
                         "records, one row per split file, which original each came from. "
                         "CTE bodies are never miscounted as their own block. Only safe "
-                        "to run against a tree you already have a separate copy of "
+                        "to run against a tree you already have a separate copy of. "
+                        "Mutually exclusive with --mask-literals in the same run -- run "
+                        "--mask-literals first as a separate pass if you need both "
                         "(default: off)")
     ap.add_argument("--un-split-selects", action="store_true",
                     help="Before scanning, revert a previous --split-selects run using "
@@ -192,7 +194,8 @@ def main(argv: list[str] | None = None) -> None:
                         "placeholder ('****' for a quoted literal, preserving its "
                         "own quote character; '0000' for an unquoted numeric "
                         "literal), everything else byte-for-byte identical. A file "
-                        "with no findings is left untouched (default: off)")
+                        "with no findings is left untouched. Mutually exclusive with "
+                        "--split-selects in the same run (default: off)")
     ap.add_argument("--quarantine", action="store_true",
                     help="Physically move files out of root instead of leaving them "
                         "in place: before the scan, every file whose extension isn't "
@@ -234,6 +237,16 @@ def main(argv: list[str] | None = None) -> None:
     if args.un_split_selects and args.split_selects:
         ap.error("--un-split-selects and --split-selects are mutually exclusive "
                  "(one reverts a previous split, the other performs a new one)")
+
+    if args.mask_literals and args.split_selects:
+        ap.error("--mask-literals and --split-selects are mutually exclusive in "
+                 "the same run: --split-selects deletes each split file's "
+                 "original once its -NN siblings are written, but "
+                 "--mask-literals masks by re-reading each finding's original "
+                 "file path after the scan completes -- so every split file "
+                 "would silently ship unmasked. Run --mask-literals alone "
+                 "first, then --split-selects as a separate pass over the "
+                 "now-masked tree")
 
     if not os.path.isdir(args.root):
         print("ERROR: not a directory: {}".format(args.root), file=sys.stderr)

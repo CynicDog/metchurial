@@ -228,6 +228,14 @@ class TestUnsplitCLI(unittest.TestCase):
                           "--split-selects", "--un-split-selects"])
         self.assertEqual(code, 2)
 
+    def test_mask_literals_with_split_selects_together_is_an_error(self):
+        code = self._run([self.sql_root, "--extensions", "sql",
+                          "--split-selects", "--mask-literals"])
+        self.assertEqual(code, 2)
+        # Rejected before either flag's effect ran -- nothing split, nothing masked.
+        self.assertTrue(os.path.isfile(os.path.join(self.sql_root, "report.sql")))
+        self.assertFalse(os.path.isfile(os.path.join(self.sql_root, "report-01.sql")))
+
 
 if __name__ == "__main__":
     unittest.main()

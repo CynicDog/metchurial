@@ -63,6 +63,27 @@ class TestNoDoubleCounting(unittest.TestCase):
         edges = relation_edges_for("SELECT * FROM t1 a, t2 b;")
         self.assertEqual(edges, [])
 
+    def test_comma_joined_self_join_produces_an_edge(self):
+        # Regression guard: a real self-join (two aliases of the same
+        # table) used to be silently dropped -- the same-table filter
+        # compared resolved (schema, table) strings, which are identical
+        # for e1/e2 even though they're two distinct TableRef instances.
+        edges = relation_edges_for(
+            "SELECT * FROM emp e1, emp e2 WHERE e1.mgr_id = e2.emp_id;")
+        self.assertEqual(len(edges), 1)
+        self.assertEqual(edges[0].join_type, "WHERE-IMPLICIT")
+        self.assertEqual((edges[0].table_a, edges[0].table_b), ("EMP", "EMP"))
+
+    def test_same_alias_both_sides_is_still_not_a_join(self):
+        # The filter this replaces still needs to catch the case it was
+        # originally meant for: a single table's own alias and its bare
+        # table name both resolve to the *same* TableRef (see
+        # QueryBlock.add_table), so comparing two of that table's own
+        # columns must not be misread as a join.
+        edges = relation_edges_for(
+            "SELECT * FROM emp e WHERE e.hire_date = emp.term_date;")
+        self.assertEqual(edges, [])
+
 
 class TestAggregateEdges(unittest.TestCase):
     def test_unordered_pair_collapses(self):

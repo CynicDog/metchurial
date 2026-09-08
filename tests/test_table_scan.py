@@ -357,6 +357,39 @@ class TestReservedKeywordAliasCollision(unittest.TestCase):
             self.assertEqual(_tables(blocks), [(ts.PLACEHOLDER_SCHEMA, "T1", letter)], sql)
 
 
+class TestDelimitedIdentifiers(unittest.TestCase):
+    """Regression guard for a real bug: DOUBLE_QUOTE_ID (a delimited/quoted
+    identifier, e.g. "MyTable") used to be classified as a literal shape,
+    so looks_like_name_start rejected it as a table-ref start. That made
+    _scan_one_table_ref return (None, i) with i unchanged, which stalled
+    _scan_table_list's loop immediately -- silently dropping every
+    remaining comma/JOIN-connected entry in that FROM clause, not just the
+    quoted one, with no warning."""
+
+    def test_quoted_table_name_does_not_truncate_the_table_list(self):
+        blocks = _blocks_for('SELECT * FROM "MyTable", t2;')[0]
+        self.assertEqual(_tables(blocks),
+                         [(ts.PLACEHOLDER_SCHEMA, "MYTABLE", "MYTABLE"),
+                          (ts.PLACEHOLDER_SCHEMA, "T2", "T2")])
+
+    def test_quoted_table_name_does_not_truncate_a_join_list(self):
+        blocks = _blocks_for('SELECT * FROM "MyTable" m JOIN t2 b ON m.x = b.y;')[0]
+        self.assertEqual(_tables(blocks),
+                         [(ts.PLACEHOLDER_SCHEMA, "MYTABLE", "M"), (ts.PLACEHOLDER_SCHEMA, "T2", "B")])
+        edge = ts.scan_join_edges(blocks)[0]
+        self.assertIn("m.x", edge.predicate_text)
+        self.assertIn("b.y", edge.predicate_text)
+
+    def test_quoted_alias_does_not_truncate_the_table_list(self):
+        blocks = _blocks_for('SELECT * FROM t1 AS "T1", t2;')[0]
+        self.assertEqual(_tables(blocks),
+                         [(ts.PLACEHOLDER_SCHEMA, "T1", "T1"), (ts.PLACEHOLDER_SCHEMA, "T2", "T2")])
+
+    def test_quoted_schema_qualified_name(self):
+        blocks = _blocks_for('SELECT * FROM "MySchema"."MyTable";')[0]
+        self.assertEqual(_tables(blocks), [("MYSCHEMA", "MYTABLE", "MYTABLE")])
+
+
 class TestCteParticipatingJoinEdge(unittest.TestCase):
     """Regression guard for a second real bug found while building
     query_identity.py: an outer query's own JOIN to a CTE result was

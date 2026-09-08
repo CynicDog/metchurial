@@ -14,11 +14,8 @@ when --quarantine is passed, moving files into _quarantine/excluded/): a
 quarantined-by-extension file's extension never matched --extensions in
 the first place, so it's moved out and never reaches this code at all --
 bad_files.tsv is strictly the files that *did* match and got a real
-attempt but failed partway through. Once flagged bad, a file is
-physically moved to _quarantine/bad_files/ too, but only when
---quarantine is passed (see quarantine.bad_files.quarantine_bad_files) --
-`quarantined_file` records where it landed, staying empty when the flag
-was off.
+attempt but failed partway through (see `quarantined_file` below for
+what happens to a bad file once flagged).
 """
 
 from __future__ import annotations

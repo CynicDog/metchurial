@@ -22,9 +22,12 @@ _BAD_FILES_HEADER = ["path", "category", "item", "message", "quarantined_file"]
 
 
 def read_text(path: str) -> tuple[str, str]:
-    """Read a file's text, trying each of ENCODINGS in order and falling
-    back to lossy UTF-8 decoding if none of them fit cleanly. Returns
-    (text, encoding_used)."""
+    """Read a file's text, trying each of ENCODINGS in order. Returns
+    (text, encoding_used). ENCODINGS ends with latin-1, which maps every
+    byte 1:1 and therefore never raises -- so the final except's
+    errors="replace" fallback below is unreachable in practice; a file
+    that doesn't match any of the earlier encodings is decoded as latin-1
+    (possibly mojibake) rather than lossily as UTF-8."""
     for enc in ENCODINGS:
         try:
             with open(path, "r", encoding=enc) as f:
@@ -37,9 +40,10 @@ def read_text(path: str) -> tuple[str, str]:
 
 def _for_each_line(path: str, handle_line: Callable[[str], None]) -> None:
     """Call handle_line(line) for each line of `path`, trying ENCODINGS in
-    order until one decodes the whole file cleanly. Lines decoded before a
-    mid-file decode failure have already been handled; a file no encoding
-    fits is processed as far as each attempt got."""
+    order until one decodes the whole file cleanly. Since ENCODINGS ends
+    with latin-1 (never raises), this always succeeds by the last
+    attempt; lines already handled from an earlier, failed attempt are
+    re-handled from the start once a later encoding succeeds."""
     for enc in ENCODINGS:
         try:
             with open(path, "r", encoding=enc) as f:

@@ -56,10 +56,14 @@ NOT_A_NAME_SEGMENT = {
     Db2Lexer.JOIN, Db2Lexer.INNER, Db2Lexer.LEFT, Db2Lexer.RIGHT, Db2Lexer.FULL, Db2Lexer.CROSS,
 }
 
-# Literal token shapes -- never a name, at any position.
+# Literal token shapes -- never a name, at any position. DOUBLE_QUOTE_ID is
+# deliberately not here: a delimited identifier ("MyTable") is a real name,
+# just a quoted one -- looks_like_name_segment already treats it as one for
+# a dotted continuation (schema."Table"), so looks_like_name_start does too
+# for consistency (see name_text for the matching quote-stripping).
 NAME_LITERAL_TOKEN_TYPES = {
     Db2Lexer.STRING_LITERAL, Db2Lexer.CHAR_LITERAL, Db2Lexer.DECIMAL_LITERAL,
-    Db2Lexer.FLOAT_LITERAL, Db2Lexer.REAL_LITERAL, Db2Lexer.DOUBLE_QUOTE_ID,
+    Db2Lexer.FLOAT_LITERAL, Db2Lexer.REAL_LITERAL,
 }
 
 
@@ -78,3 +82,17 @@ def looks_like_name_start(token: Token) -> bool:
     return (token.type not in NOT_A_NAME_SEGMENT
             and token.type not in NAME_LITERAL_TOKEN_TYPES
             and token.type != Token.EOF)
+
+
+def name_text(token: Token) -> str:
+    """Upper-cased identifier text for a name-shaped token: token.text.upper()
+    for any ordinary identifier, same as every call site used to compute
+    inline before this helper existed -- except a delimited (double-quoted)
+    identifier, whose surrounding '"' characters are stripped first, so
+    "MyTable" normalizes to MYTABLE like any other reference to the same
+    object instead of carrying literal quote characters into every
+    downstream table/column/alias name."""
+    text = token.text
+    if token.type == Db2Lexer.DOUBLE_QUOTE_ID and len(text) >= 2:
+        text = text[1:-1]
+    return text.upper()

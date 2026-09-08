@@ -6,15 +6,12 @@ else in the file byte-for-byte unchanged.
 This module never re-derives "is this a sensitive literal" itself -- it
 strictly consumes the (start_offset, end_offset) span already captured on
 each finding dict by extractor_visitor.py/supplementary_checks.py/
-comment_rescan.py (sensitive-column comparison detection's finding, via
-three independent detection paths) and engine.py's known_names.txt-matching
-regex pass (known-name matching's finding). That division
-of labor is what makes masking automatically safe against the large set of
-edge cases those detectors already handle (bare-paren-before-literal,
-double-quoted literals, IN-lists, BETWEEN bounds, reversed comparisons,
-subquery scoping, malformed/truncated comment fragments, host variables,
-bare identifiers, blank literals, ...): if a construct doesn't produce a
-finding, masking never sees a span for it, so it's never touched.
+comment_rescan.py (sensitive-column comparison detection, via three
+independent detection paths) and engine.py's known_names.txt-matching
+regex pass. That division of labor is what makes masking automatically
+safe against every edge case those detectors already handle: if a
+construct doesn't produce a finding, masking never sees a span for it,
+so it's never touched.
 
 Offsets follow the same convention used everywhere in this codebase (see
 extractor_visitor.as_literal / references/function_visitor._slice):
@@ -135,10 +132,12 @@ def write_masked_files(findings: list[Finding],
     """findings: the scan's Finding list (see cli.py). For each distinct file among them,
     re-reads the file (via io_utils.read_text -- the same deterministic
     encoding auto-detection used during scanning; re-detecting is safe
-    since the file's bytes haven't changed since it was scanned), builds
-    the masked text, and overwrites the file in place with it. A file all
-    of whose findings get defensively skipped (nothing actually masked)
-    is left untouched. Returns the list of paths rewritten."""
+    since the file's bytes haven't changed since it was scanned -- cli.py
+    rejects --mask-literals combined with --split-selects up front so
+    this assumption always holds; see its own flag-conflict check),
+    builds the masked text, and overwrites the file in place with it. A
+    file all of whose findings get defensively skipped (nothing actually
+    masked) is left untouched. Returns the list of paths rewritten."""
     by_file: dict[str, list[Finding]] = defaultdict(list)
     for f in findings:
         if f.start_offset is None or f.end_offset is None:
